@@ -158,6 +158,8 @@ bool submit_frame()
         stage("first WaitGetPoses");
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
         vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+        const auto& hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
+        vrtrack::set_render_pose(hmd.mDeviceToAbsoluteTracking, hmd.bPoseIsValid);
         g_wgp_called = true;
     }
 
@@ -263,10 +265,15 @@ bool submit_frame()
                                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout[e]);
     }
 
-    // End-of-frame heartbeat: pace to HMD refresh and fetch next frame's poses.
+    // End-of-frame heartbeat: pace to HMD refresh and fetch next frame's
+    // predicted pose. Handing it to vrtrack is what keeps our render pose and
+    // the compositor's display assumption identical - the anti-double-vision
+    // contract.
     stage("WaitGetPoses");
     vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
     vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+    const auto& hmd_pose = poses[vr::k_unTrackedDeviceIndex_Hmd];
+    vrtrack::set_render_pose(hmd_pose.mDeviceToAbsoluteTracking, hmd_pose.bPoseIsValid);
     stage("frame done");
 
     ++g_submits;

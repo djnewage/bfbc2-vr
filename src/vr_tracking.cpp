@@ -14,7 +14,21 @@ ULONGLONG g_last_try = 0;
 bool  g_have_pose = false;
 float g_rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
 
+// Render pose delivered by the compositor loop (see header).
+bool  g_have_render_pose = false;
+float g_render_rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
+
 } // namespace
+
+void set_render_pose(const vr::HmdMatrix34_t& pose, bool valid)
+{
+    if (!valid) return;
+    const auto& m = pose.m;
+    g_render_rot[0] = m[0][0]; g_render_rot[1] = m[0][1]; g_render_rot[2] = m[0][2];
+    g_render_rot[3] = m[1][0]; g_render_rot[4] = m[1][1]; g_render_rot[5] = m[1][2];
+    g_render_rot[6] = m[2][0]; g_render_rot[7] = m[2][1]; g_render_rot[8] = m[2][2];
+    g_have_render_pose = true;
+}
 
 bool ensure_init()
 {
@@ -72,9 +86,18 @@ void update()
     g_have_pose = false;
     if (!g_system && !ensure_init()) return;
 
+    // Compositor-predicted pose wins: it is what the compositor will assume
+    // this frame was rendered with. One pose per frame - the flag resets so a
+    // stalled compositor loop falls back to sampling instead of freezing.
+    if (g_have_render_pose) {
+        std::memcpy(g_rot, g_render_rot, sizeof(g_rot));
+        g_have_render_pose = false;
+        g_have_pose = true;
+        return;
+    }
+
     vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-    // Predict slightly ahead; for a monitor-steering test the exact photon
-    // time is not critical.
+    // Fallback: freely sampled pose (tracking-only mode, no compositor).
     g_system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.02f,
                                               poses, vr::k_unMaxTrackedDeviceCount);
 

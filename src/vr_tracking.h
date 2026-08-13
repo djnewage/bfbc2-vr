@@ -15,7 +15,17 @@
 // APIs for exactly this reason. OpenXR arrives with stereo in Phase 4.
 #pragma once
 
+namespace vr { struct HmdMatrix34_t; }
+
 namespace vrtrack {
+
+// Pose handoff from the compositor loop. WaitGetPoses returns the pose the
+// compositor PREDICTS for the frame about to be rendered - rendering with any
+// other pose (e.g. a freely sampled "now" pose) makes the compositor's
+// reprojection misalign the image by the difference, which in alternate-eye
+// stereo doubles the world during head motion. When a render pose has been
+// provided since the last update(), it wins over the sampled pose.
+void set_render_pose(const vr::HmdMatrix34_t& pose, bool valid);
 
 // Attempt OpenVR init in Background mode. Safe to call every frame; retries
 // on a slow cadence until SteamVR is up, then sticks. Returns current state.

@@ -27,8 +27,10 @@ float g_angle_rad  = 0.0f;
 bool  g_hmd_active   = false;   // pose seen and reference captured
 float g_ref_yaw      = 0.0f;
 float g_ref_pitch    = 0.0f;
-float g_yaw_sign     = 1.0f;
-float g_pitch_sign   = 1.0f;
+// Field-calibrated 2026-08-13: default signs were inverted on both axes
+// (user confirmed one F8 and one F6 press fixed look direction).
+float g_yaw_sign     = -1.0f;
+float g_pitch_sign   = -1.0f;
 float g_hmd_yaw      = 0.0f;    // current delta, radians
 float g_hmd_pitch    = 0.0f;
 
