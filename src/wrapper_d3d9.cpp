@@ -1,4 +1,5 @@
 #include "wrappers.h"
+#include "vr_compositor.h"
 #include "logger.h"
 
 HRESULT STDMETHODCALLTYPE D3D9Wrapper::QueryInterface(REFIID riid, void** ppvObj)
@@ -56,6 +57,7 @@ HRESULT STDMETHODCALLTYPE D3D9Wrapper::CreateDevice(UINT adapter, D3DDEVTYPE typ
     }
 
     VRLOG("[device] wrapping device %p", real_device);
+    vrcomp::on_device_created(real_device);
     *out = new D3D9DeviceWrapper(real_device, this);
     return hr;
 }

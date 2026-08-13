@@ -12,6 +12,7 @@
 #include "constants.h"
 #include "camera_override.h"
 #include "shader_registry.h"
+#include "vr_compositor.h"
 #include "logger.h"
 
 #include <vector>
@@ -121,6 +122,7 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Present(const RECT* src, const RECT
     vrconst::on_present();
     camover::on_present();
     shaderreg::on_present();
+    vrcomp::submit_frame();
     return m_real->Present(src, dst, wnd, dirty);
 }
 
@@ -199,6 +201,7 @@ HRESULT STDMETHODCALLTYPE D3D9SwapChainWrapper::Present(const RECT* src, const R
     vrconst::on_present();
     camover::on_present();
     shaderreg::on_present();
+    vrcomp::submit_frame();
     return m_real->Present(src, dst, wnd, dirty, flags);
 }
 
@@ -220,5 +223,8 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Reset(D3DPRESENT_PARAMETERS* pp)
     if (pp) {
         VRLOG("[device] Reset: %ux%u windowed=%d", pp->BackBufferWidth, pp->BackBufferHeight, pp->Windowed);
     }
-    return m_real->Reset(pp);
+    vrcomp::on_reset_begin();   // default-pool eye texture must die before Reset
+    const HRESULT hr = m_real->Reset(pp);
+    if (SUCCEEDED(hr)) vrcomp::on_device_created(m_real);   // re-read backbuffer size
+    return hr;
 }

@@ -38,9 +38,16 @@ bool ensure_init()
     }
 
     vr::EVRInitError err = vr::VRInitError_None;
-    // Background: we do not own the compositor, we only read poses. This is
-    // what keeps Phase 3b small - no graphics binding, no frame submission.
-    g_system = vr::VR_Init(&err, vr::VRApplication_Background);
+    // Scene mode: Phase 4 submits frames, and the compositor only accepts
+    // Submit from a scene app. Falls back to Background (tracking-only, the
+    // Phase 3b behavior) if Scene init is refused.
+    g_system = vr::VR_Init(&err, vr::VRApplication_Scene);
+    if (err != vr::VRInitError_None) {
+        VRLOG("[vr] Scene init failed (%s) - falling back to Background",
+              vr::VR_GetVRInitErrorAsEnglishDescription(err));
+        err = vr::VRInitError_None;
+        g_system = vr::VR_Init(&err, vr::VRApplication_Background);
+    }
     if (err != vr::VRInitError_None) {
         g_system = nullptr;
         static vr::EVRInitError last_logged = vr::VRInitError_None;

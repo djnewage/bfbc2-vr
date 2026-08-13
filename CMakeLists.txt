@@ -19,12 +19,18 @@ add_library(d3d9 SHARED
     src/camera_override.cpp
     src/shader_registry.cpp
     src/vr_tracking.cpp
+    src/vr_compositor.cpp
     src/wrapper_d3d9.cpp
     src/wrapper_device.cpp
     src/d3d9.def
 )
 
-target_include_directories(d3d9 PRIVATE src thirdparty/openvr)
+target_include_directories(d3d9 PRIVATE
+    src
+    thirdparty/openvr
+    thirdparty/dxvk       # vendored d3d9_interfaces.h (interop, dxvk v3.0.2)
+    thirdparty/vulkan     # vendored Vulkan core headers (types only, no loader)
+)
 
 # The output must be named exactly d3d9.dll so the game's LoadLibrary finds it.
 set_target_properties(d3d9 PROPERTIES
