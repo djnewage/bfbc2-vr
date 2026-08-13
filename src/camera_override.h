@@ -64,4 +64,12 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
 // Once per presented frame: advance the angle, rebuild the correction, poll keys.
 void on_present();
 
+// Alternate-eye rendering. Each frame is rendered from one eye's viewpoint
+// (correction includes a +/- half-IPD lateral offset along the camera's right
+// axis); the eye alternates at every Present. The compositor submits the
+// fresh texture for this frame's eye and last frame's texture for the other.
+//   0 = left, 1 = right
+int  last_rendered_eye();
+bool stereo_active();
+
 } // namespace camover

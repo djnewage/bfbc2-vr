@@ -1,5 +1,6 @@
 #include "vr_compositor.h"
 #include "vr_tracking.h"
+#include "camera_override.h"
 #include "logger.h"
 
 #include <windows.h>
@@ -13,8 +14,10 @@ namespace {
 IDirect3DDevice9*     g_device      = nullptr;   // real device, not our wrapper
 ID3D9VkInteropDevice* g_interop_dev = nullptr;
 
-IDirect3DTexture9*    g_eye_tex     = nullptr;   // shared by both eyes for first light
-ID3D9VkInteropTexture* g_eye_interop = nullptr;
+// One texture per eye for alternate-eye rendering: each frame refreshes the
+// eye the game just rendered; the other eye re-submits last frame's image.
+IDirect3DTexture9*     g_eye_tex[2]     = {};
+ID3D9VkInteropTexture* g_eye_interop[2] = {};
 
 VkInstance       g_vk_instance = VK_NULL_HANDLE;
 VkPhysicalDevice g_vk_physdev  = VK_NULL_HANDLE;
@@ -67,22 +70,25 @@ bool init_interop_device()
 
 bool init_eye_texture()
 {
-    if (g_eye_tex) return true;
+    if (g_eye_tex[0] && g_eye_tex[1]) return true;
     if (!g_device || !g_width) return false;
 
-    // Render target in default pool: lives GPU-side, backed by a real VkImage.
-    if (FAILED(g_device->CreateTexture(g_width, g_height, 1, D3DUSAGE_RENDERTARGET,
-                                       D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_eye_tex, nullptr))) {
-        VRLOG("[comp] eye texture creation failed (%ux%u)", g_width, g_height);
-        return false;
+    for (int e = 0; e < 2; ++e) {
+        if (g_eye_tex[e]) continue;
+        // Render target in default pool: lives GPU-side, backed by a real VkImage.
+        if (FAILED(g_device->CreateTexture(g_width, g_height, 1, D3DUSAGE_RENDERTARGET,
+                                           D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_eye_tex[e], nullptr))) {
+            VRLOG("[comp] eye %d texture creation failed (%ux%u)", e, g_width, g_height);
+            return false;
+        }
+        if (FAILED(g_eye_tex[e]->QueryInterface(__uuidof(ID3D9VkInteropTexture),
+                                                reinterpret_cast<void**>(&g_eye_interop[e])))) {
+            VRLOG("[comp] eye %d texture has no interop interface", e);
+            g_eye_tex[e]->Release(); g_eye_tex[e] = nullptr;
+            return false;
+        }
     }
-    if (FAILED(g_eye_tex->QueryInterface(__uuidof(ID3D9VkInteropTexture),
-                                         reinterpret_cast<void**>(&g_eye_interop)))) {
-        VRLOG("[comp] eye texture has no interop interface");
-        g_eye_tex->Release(); g_eye_tex = nullptr;
-        return false;
-    }
-    VRLOG("[comp] eye texture ready (%ux%u)", g_width, g_height);
+    VRLOG("[comp] eye textures ready (2x %ux%u)", g_width, g_height);
     return true;
 }
 
@@ -120,9 +126,11 @@ void on_device_created(IDirect3DDevice9* real_device)
 
 void on_reset_begin()
 {
-    if (g_eye_interop) { g_eye_interop->Release(); g_eye_interop = nullptr; }
-    if (g_eye_tex)     { g_eye_tex->Release();     g_eye_tex = nullptr; }
-    VRLOG("[comp] reset: eye texture released");
+    for (int e = 0; e < 2; ++e) {
+        if (g_eye_interop[e]) { g_eye_interop[e]->Release(); g_eye_interop[e] = nullptr; }
+        if (g_eye_tex[e])     { g_eye_tex[e]->Release();     g_eye_tex[e] = nullptr; }
+    }
+    VRLOG("[comp] reset: eye textures released");
 }
 
 bool submit_frame()
@@ -169,10 +177,15 @@ bool submit_frame()
     }
     if (!init_eye_texture()) { bb->Release(); return false; }
 
-    // 1. Mirror the backbuffer into our eye texture.
+    // 1. Mirror the backbuffer into the eye texture the game just rendered
+    //    for. In stereo the eye alternates per frame; in mono it stays 0 and
+    //    both panels get the same picture via the submit below.
+    const int fresh = camover::stereo_active() ? camover::last_rendered_eye() : 0;
+    const bool mono = !camover::stereo_active();
+
     stage("StretchRect");
     IDirect3DSurface9* dst = nullptr;
-    if (FAILED(g_eye_tex->GetSurfaceLevel(0, &dst)) || !dst) { bb->Release(); return false; }
+    if (FAILED(g_eye_tex[fresh]->GetSurfaceLevel(0, &dst)) || !dst) { bb->Release(); return false; }
     const HRESULT copy_hr = g_device->StretchRect(bb, nullptr, dst, nullptr, D3DTEXF_NONE);
     bb->Release(); dst->Release();
     if (FAILED(copy_hr)) {
@@ -181,19 +194,21 @@ bool submit_frame()
         return false;
     }
 
-    // 2. Vulkan handle + current layout of the eye image.
+    // 2. Vulkan handles + layouts for both eye images.
     stage("GetVulkanImageInfo");
-    VkImage image = VK_NULL_HANDLE;
-    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkImageCreateInfo info = {};
-    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    if (FAILED(g_eye_interop->GetVulkanImageInfo(&image, &layout, &info))) {
-        static bool logged = false;
-        if (!logged) { logged = true; VRLOG("[comp] GetVulkanImageInfo failed"); }
-        return false;
+    VkImage image[2] = {};
+    VkImageLayout layout[2] = {};
+    VkImageCreateInfo info[2] = {};
+    for (int e = 0; e < 2; ++e) {
+        info[e].sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        if (FAILED(g_eye_interop[e]->GetVulkanImageInfo(&image[e], &layout[e], &info[e]))) {
+            static bool logged = false;
+            if (!logged) { logged = true; VRLOG("[comp] GetVulkanImageInfo failed (eye %d)", e); }
+            return false;
+        }
     }
 
-    // 3. Compositor wants TRANSFER_SRC_OPTIMAL. Transition, flush, submit
+    // 3. Compositor wants TRANSFER_SRC_OPTIMAL. Transition both, flush, submit
     //    under the queue lock, release, transition back. The lock rules are
     //    strict: no D3D9 calls while held, or DXVK deadlocks.
     VkImageSubresourceRange range = {};
@@ -202,41 +217,51 @@ bool submit_frame()
     range.layerCount = 1;
 
     stage("transition to TRANSFER_SRC");
-    g_interop_dev->TransitionTextureLayout(g_eye_interop, &range, layout,
-                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    for (int e = 0; e < 2; ++e) {
+        g_interop_dev->TransitionTextureLayout(g_eye_interop[e], &range, layout[e],
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    }
     stage("FlushRenderingCommands");
     g_interop_dev->FlushRenderingCommands();
 
-    vr::VRVulkanTextureData_t vkdata = {};
-    // On x86 VkImage is a non-dispatchable handle, already a uint64_t.
-    vkdata.m_nImage            = static_cast<uint64_t>(image);
-    vkdata.m_pDevice           = reinterpret_cast<VkDevice_T*>(g_vk_device);
-    vkdata.m_pPhysicalDevice   = reinterpret_cast<VkPhysicalDevice_T*>(g_vk_physdev);
-    vkdata.m_pInstance         = reinterpret_cast<VkInstance_T*>(g_vk_instance);
-    vkdata.m_pQueue            = reinterpret_cast<VkQueue_T*>(g_vk_queue);
-    vkdata.m_nQueueFamilyIndex = g_vk_queue_family;
-    vkdata.m_nWidth            = g_width;
-    vkdata.m_nHeight           = g_height;
-    vkdata.m_nFormat           = static_cast<uint32_t>(info.format);
-    vkdata.m_nSampleCount      = 1;
+    vr::VRVulkanTextureData_t vkdata[2] = {};
+    vr::Texture_t tex[2] = {};
+    for (int e = 0; e < 2; ++e) {
+        // On x86 VkImage is a non-dispatchable handle, already a uint64_t.
+        vkdata[e].m_nImage            = static_cast<uint64_t>(image[e]);
+        vkdata[e].m_pDevice           = reinterpret_cast<VkDevice_T*>(g_vk_device);
+        vkdata[e].m_pPhysicalDevice   = reinterpret_cast<VkPhysicalDevice_T*>(g_vk_physdev);
+        vkdata[e].m_pInstance         = reinterpret_cast<VkInstance_T*>(g_vk_instance);
+        vkdata[e].m_pQueue            = reinterpret_cast<VkQueue_T*>(g_vk_queue);
+        vkdata[e].m_nQueueFamilyIndex = g_vk_queue_family;
+        vkdata[e].m_nWidth            = g_width;
+        vkdata[e].m_nHeight           = g_height;
+        vkdata[e].m_nFormat           = static_cast<uint32_t>(info[e].format);
+        vkdata[e].m_nSampleCount      = 1;
+        tex[e].handle      = &vkdata[e];
+        tex[e].eType       = vr::TextureType_Vulkan;
+        tex[e].eColorSpace = vr::ColorSpace_Auto;
+    }
 
-    vr::Texture_t tex = {};
-    tex.handle      = &vkdata;
-    tex.eType       = vr::TextureType_Vulkan;
-    tex.eColorSpace = vr::ColorSpace_Auto;
+    // Mono: both panels get the fresh texture. Stereo: each panel gets its
+    // own texture - one refreshed this frame, the other one frame stale.
+    vr::Texture_t* tex_l = mono ? &tex[fresh] : &tex[0];
+    vr::Texture_t* tex_r = mono ? &tex[fresh] : &tex[1];
 
     stage("LockSubmissionQueue");
     g_interop_dev->LockSubmissionQueue();
     stage("Submit L");
-    const auto err_l = vr::VRCompositor()->Submit(vr::Eye_Left,  &tex);
+    const auto err_l = vr::VRCompositor()->Submit(vr::Eye_Left,  tex_l);
     stage("Submit R");
-    const auto err_r = vr::VRCompositor()->Submit(vr::Eye_Right, &tex);
+    const auto err_r = vr::VRCompositor()->Submit(vr::Eye_Right, tex_r);
     stage("ReleaseSubmissionQueue");
     g_interop_dev->ReleaseSubmissionQueue();
 
     stage("transition back");
-    g_interop_dev->TransitionTextureLayout(g_eye_interop, &range,
-                                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout);
+    for (int e = 0; e < 2; ++e) {
+        g_interop_dev->TransitionTextureLayout(g_eye_interop[e], &range,
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout[e]);
+    }
 
     // End-of-frame heartbeat: pace to HMD refresh and fetch next frame's poses.
     stage("WaitGetPoses");

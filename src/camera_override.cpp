@@ -32,6 +32,15 @@ float g_pitch_sign   = 1.0f;
 float g_hmd_yaw      = 0.0f;    // current delta, radians
 float g_hmd_pitch    = 0.0f;
 
+// Alternate-eye rendering state. The IPD is in WORLD units and the engine's
+// world scale is not yet measured, so it is runtime-adjustable: if the world
+// feels like a miniature, the offset is too big; like a giant's world, too
+// small. F2/F3 tune it, F1 swaps eyes (swapped eyes = depth pops inward).
+int   g_frame_eye    = 0;       // eye the CURRENT frame is being rendered for
+int   g_last_eye     = 0;       // eye the just-presented frame used
+float g_ipd_world    = 0.064f;  // world-units offset between eyes
+float g_eye_swap     = 1.0f;    // -1 swaps left/right
+
 // Yaw/pitch of the HMD forward vector in OpenVR space (right-handed, Y-up,
 // forward -Z). Yaw 0 = facing -Z; positive = turning toward -X (left).
 void hmd_yaw_pitch(float& yaw, float& pitch)
@@ -272,6 +281,20 @@ void rebuild_correction()
     multiply(to_origin, rot, tmp);
     multiply(tmp, back, r);          // rotate about the eye, not the origin
 
+    // Stereo eye offset: shift the camera half an IPD along its right axis.
+    // Shifting the CAMERA right by d == shifting the WORLD left by d, so the
+    // world translation is -d for the right eye, +d for the left.
+    if (g_hmd_active) {
+        // Note: F1 eye-swap is applied at SUBMISSION (last_rendered_eye), not
+        // here - applying it in both places would cancel itself out.
+        const float half = 0.5f * g_ipd_world;
+        const float side = (g_frame_eye == 0) ? +half : -half;
+        Mat4 eye_shift, r2;
+        translation(side * g_cam_right[0], side * g_cam_right[1], side * g_cam_right[2], eye_shift);
+        multiply(r, eye_shift, r2);
+        std::memcpy(r, r2, sizeof(r));
+    }
+
     multiply(vp_inv, r, tmp);
     multiply(tmp, g_vp, g_correction);
     g_have_correction = true;
@@ -347,6 +370,11 @@ void on_present()
     const float dt = last_tick ? (now - last_tick) / 1000.0f : 0.0f;
     last_tick = now;
 
+    // Alternate-eye cadence: the frame that just presented used g_frame_eye;
+    // record it for the compositor, then flip for the frame about to render.
+    g_last_eye  = g_frame_eye;
+    g_frame_eye ^= 1;
+
     // Head tracking: refresh the pose and, while enabled, convert it to a
     // yaw/pitch delta against the reference captured when tracking engaged.
     vrtrack::update();
@@ -418,6 +446,23 @@ void on_present()
             VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
         }
     }
+
+    // Stereo calibration.
+    if (key_pressed(VK_F1)) {
+        g_eye_swap = -g_eye_swap;
+        VRLOG("[stereo] eyes %s", g_eye_swap > 0 ? "normal" : "SWAPPED");
+    }
+    if (key_pressed(VK_F2)) {
+        g_ipd_world *= 0.8f;
+        VRLOG("[stereo] IPD -> %.4f world units", g_ipd_world);
+    }
+    if (key_pressed(VK_F3)) {
+        g_ipd_world *= 1.25f;
+        VRLOG("[stereo] IPD -> %.4f world units", g_ipd_world);
+    }
 }
+
+int  last_rendered_eye() { return (g_eye_swap > 0) ? g_last_eye : (g_last_eye ^ 1); }
+bool stereo_active()     { return g_hmd_active && g_correct_on; }
 
 } // namespace camover
