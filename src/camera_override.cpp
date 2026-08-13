@@ -1,5 +1,6 @@
 #include "camera_override.h"
 #include "shader_registry.h"
+#include "vr_tracking.h"
 #include "logger.h"
 
 #include <windows.h>
@@ -17,6 +18,32 @@ constexpr float kDegPerSecond = 25.0f;   // slow enough to read as deliberate
 bool  g_correct_on = false;
 bool  g_transposed = true;    // HLSL default packing is column-major (stored = M^T)
 float g_angle_rad  = 0.0f;
+
+// Head tracking. When an HMD pose is available the correction R comes from the
+// head's yaw/pitch delta against a reference captured at enable time; the
+// synthetic spin only runs when there is no pose, so the old test still works
+// with SteamVR closed. Axis signs are field-calibrated (F8/F6) because the
+// mapping between OpenVR axes and this engine's axes is empirical.
+bool  g_hmd_active   = false;   // pose seen and reference captured
+float g_ref_yaw      = 0.0f;
+float g_ref_pitch    = 0.0f;
+float g_yaw_sign     = 1.0f;
+float g_pitch_sign   = 1.0f;
+float g_hmd_yaw      = 0.0f;    // current delta, radians
+float g_hmd_pitch    = 0.0f;
+
+// Yaw/pitch of the HMD forward vector in OpenVR space (right-handed, Y-up,
+// forward -Z). Yaw 0 = facing -Z; positive = turning toward -X (left).
+void hmd_yaw_pitch(float& yaw, float& pitch)
+{
+    float r[9];
+    vrtrack::orientation(r);
+    // forward = R * (0,0,-1), rows are r[0..2], r[3..5], r[6..8]
+    const float fx = -r[2], fy = -r[5], fz = -r[8];
+    yaw   = std::atan2(fx, -fz);
+    const float len = std::sqrt(fx * fx + fz * fz);
+    pitch = std::atan2(fy, len > 1e-6f ? len : 1e-6f);
+}
 
 // Write-pattern evidence. "Which (start,count) shapes arrive per frame, and
 // how many did the probe actually modify?" separates a base that hits one
@@ -52,6 +79,7 @@ std::mutex g_fp_mutex;
 std::map<std::pair<void*, unsigned>, int> g_fingerprints;
 unsigned g_fp_found = 0, g_fp_rejected = 0;
 float g_eye[3]         = {};   // camera position, from c192
+float g_cam_right[3]   = { 1, 0, 0 };   // camera right axis, from c189 row 0
 bool  g_have_eye       = false;
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
@@ -88,6 +116,17 @@ void transpose(const Mat4 m, Mat4 out)
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             at(out, r, c) = at(m, c, r);
+}
+
+// Rodrigues rotation about an arbitrary (normalized) axis, row-vector form.
+void rotation_axis(const float axis[3], float rad, Mat4 m)
+{
+    const float c = std::cos(rad), s = std::sin(rad), t = 1.0f - c;
+    const float x = axis[0], y = axis[1], z = axis[2];
+    identity(m);
+    at(m,0,0) = t*x*x + c;   at(m,0,1) = t*x*y + s*z; at(m,0,2) = t*x*z - s*y;
+    at(m,1,0) = t*x*y - s*z; at(m,1,1) = t*y*y + c;   at(m,1,2) = t*y*z + s*x;
+    at(m,2,0) = t*x*z + s*y; at(m,2,1) = t*y*z - s*x; at(m,2,2) = t*z*z + c;
 }
 
 void translation(float x, float y, float z, Mat4 m)
@@ -215,9 +254,20 @@ void rebuild_correction()
     std::memcpy(g_vp_inv, vp_inv, sizeof(g_vp_inv));
     g_have_vp_inv = true;
 
-    Mat4 to_origin, rot, back, r, tmp;
+    // The rotation: HMD yaw/pitch delta when tracking, synthetic spin otherwise.
+    Mat4 rot;
+    if (g_hmd_active) {
+        const float wy[3] = { 0.0f, 1.0f, 0.0f };
+        Mat4 ry, rp;
+        rotation_axis(wy, g_yaw_sign * g_hmd_yaw, ry);
+        rotation_axis(g_cam_right, g_pitch_sign * g_hmd_pitch, rp);
+        multiply(rp, ry, rot);   // pitch about camera right, then yaw about world up
+    } else {
+        rotation_y(g_angle_rad, rot);
+    }
+
+    Mat4 to_origin, back, r, tmp;
     translation(-g_eye[0], -g_eye[1], -g_eye[2], to_origin);
-    rotation_y(g_angle_rad, rot);
     translation(g_eye[0], g_eye[1], g_eye[2], back);
     multiply(to_origin, rot, tmp);
     multiply(tmp, back, r);          // rotate about the eye, not the origin
@@ -243,7 +293,9 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
         g_have_vp = true;
     }
     if (covers(start_register, vec4_count, kCamWorldBase)) {
+        const float* row0 = data + (kCamWorldBase + 0 - start_register) * 4;
         const float* row3 = data + (kCamWorldBase + 3 - start_register) * 4;
+        g_cam_right[0] = row0[0]; g_cam_right[1] = row0[1]; g_cam_right[2] = row0[2];
         g_eye[0] = row3[0]; g_eye[1] = row3[1]; g_eye[2] = row3[2];
         g_have_eye = true;
     }
@@ -295,7 +347,26 @@ void on_present()
     const float dt = last_tick ? (now - last_tick) / 1000.0f : 0.0f;
     last_tick = now;
 
-    if (g_correct_on) {
+    // Head tracking: refresh the pose and, while enabled, convert it to a
+    // yaw/pitch delta against the reference captured when tracking engaged.
+    vrtrack::update();
+    if (g_correct_on && vrtrack::have_pose()) {
+        float yaw, pitch;
+        hmd_yaw_pitch(yaw, pitch);
+        if (!g_hmd_active) {
+            g_hmd_active = true;
+            g_ref_yaw = yaw; g_ref_pitch = pitch;
+            VRLOG("[vr] head tracking engaged (ref yaw=%.1f pitch=%.1f deg)",
+                  yaw * 180.0f / kPi, pitch * 180.0f / kPi);
+        }
+        g_hmd_yaw   = yaw   - g_ref_yaw;
+        g_hmd_pitch = pitch - g_ref_pitch;
+    } else if (g_hmd_active && !g_correct_on) {
+        g_hmd_active = false;
+        VRLOG("[vr] head tracking disengaged");
+    }
+
+    if (g_correct_on && !g_hmd_active) {
         g_angle_rad += dt * kDegPerSecond * kPi / 180.0f;
         if (g_angle_rad > 2.0f * kPi) g_angle_rad -= 2.0f * kPi;
     }
@@ -321,13 +392,31 @@ void on_present()
               g_correct_on ? "ON" : "off", g_transposed ? "transposed" : "row-registers",
               (int)g_have_vp, (int)g_have_eye, (int)g_have_correction);
     }
+    // With head tracking live, F8/F6 calibrate axis signs; the transposed
+    // convention is settled and only needs changing if geometry breaks again.
     if (key_pressed(VK_F8)) {
-        g_transposed = !g_transposed;
-        VRLOG("[correct] convention -> %s", g_transposed ? "transposed" : "row-registers");
+        if (g_hmd_active) {
+            g_yaw_sign = -g_yaw_sign;
+            VRLOG("[vr] yaw sign -> %+0.f", g_yaw_sign);
+        } else {
+            g_transposed = !g_transposed;
+            VRLOG("[correct] convention -> %s", g_transposed ? "transposed" : "row-registers");
+        }
+    }
+    if (key_pressed(VK_F6) && g_hmd_active) {
+        g_pitch_sign = -g_pitch_sign;
+        VRLOG("[vr] pitch sign -> %+0.f", g_pitch_sign);
     }
     if (key_pressed(VK_F5)) {
         g_angle_rad = 0.0f;
-        VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
+        if (g_hmd_active) {
+            float yaw, pitch;
+            hmd_yaw_pitch(yaw, pitch);
+            g_ref_yaw = yaw; g_ref_pitch = pitch;
+            VRLOG("[vr] reference recentered");
+        } else {
+            VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
+        }
     }
 }
 

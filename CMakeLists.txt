@@ -18,12 +18,13 @@ add_library(d3d9 SHARED
     src/constants.cpp
     src/camera_override.cpp
     src/shader_registry.cpp
+    src/vr_tracking.cpp
     src/wrapper_d3d9.cpp
     src/wrapper_device.cpp
     src/d3d9.def
 )
 
-target_include_directories(d3d9 PRIVATE src)
+target_include_directories(d3d9 PRIVATE src thirdparty/openvr)
 
 # The output must be named exactly d3d9.dll so the game's LoadLibrary finds it.
 set_target_properties(d3d9 PROPERTIES
@@ -41,4 +42,7 @@ endif()
 # Deliberately NOT linking d3d9.lib: this DLL *is* d3d9.dll, and importing from
 # the real one would make it depend on itself. The backend is resolved at runtime
 # by LoadLibrary instead - see dllmain.cpp.
-target_link_libraries(d3d9 PRIVATE dxguid.lib)
+target_link_libraries(d3d9 PRIVATE
+    dxguid.lib
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/openvr/lib/win32/openvr_api.lib
+)

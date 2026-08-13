@@ -153,6 +153,13 @@ if ($running -and (Test-Path $Target)) {
 Copy-Item $dll $Target -Force
 Write-Host "Installed proxy -> $Target" -ForegroundColor Green
 
+# OpenVR runtime DLL (x86) - required since the proxy links openvr_api.lib.
+$openvrDll = Join-Path $Root 'thirdparty\openvr\bin\win32\openvr_api.dll'
+if (Test-Path $openvrDll) {
+    Copy-Item $openvrDll (Join-Path $GameDir 'openvr_api.dll') -Force
+    Write-Host "Installed openvr_api.dll (x86)" -ForegroundColor Green
+}
+
 if (Test-Path $DxvkName) {
     Write-Host "Chain: BFBC2Game.exe -> d3d9.dll (ours) -> dxvk_d3d9.dll -> Vulkan" -ForegroundColor Green
 } else {

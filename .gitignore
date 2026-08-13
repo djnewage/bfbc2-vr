@@ -11,6 +11,9 @@ obj/
 *.dll
 *.user
 
+# Exception: vendored OpenVR x86 runtime + import lib (pinned SDK v2.15.6)
+!thirdparty/openvr/bin/win32/openvr_api.dll
+
 # Captures & scratch
 captures/
 *.rdc
