@@ -3,6 +3,8 @@
 #include "vr_tracking.h"
 #include "logger.h"
 
+#include <openvr.h>   // GetProjectionRaw, for auto FOV widening
+
 #include <windows.h>
 #include <cmath>
 #include <cstring>
@@ -102,14 +104,24 @@ float g_cam_right[3]   = { 1, 0, 0 };   // camera right axis, from c189 row 0
 float g_cam_rows[9]    = { 1,0,0, 0,1,0, 0,0,1 };   // full camera-to-world 3x3
 bool  g_have_eye       = false;
 
-// FOV widening: scale the camera's x/y axes down by this factor inside the
-// correction, which makes the game render a WIDER field into the same image.
-// The submitted image's tangents grow by the same factor (see
-// game_proj_tangents), so the compositor displays it at correct angular size -
-// shrinking the black border around the "theater window". The game still
-// CPU-culls at its own narrower frustum, so expect pop-in at the edges as
-// this rises; that is the known cost until culling is addressed.
-float g_fov_widen = 1.0f;   // 1.0 = off; PgUp/PgDn adjust
+// FOV widening: scale the camera's x/y axes down inside the correction, so the
+// game renders a WIDER field into the same image. game_proj_tangents reports
+// the widened tangents, so the compositor keeps displaying at correct angular
+// size - the black border shrinks instead of the image stretching.
+//
+// AUTO: the factors are computed from the headset's own frustum
+// (GetProjectionRaw) against the game's native tangents, per axis. They must
+// be per-axis because the Index's frustum is nearly square (~2.6 x 2.8 in
+// tangent units) while the game renders 16:9 - a uniform factor would either
+// leave the top and bottom black or waste enormous horizontal field.
+//
+// Cost, stated plainly: the engine still CPU-culls at its native frustum, so
+// edge pop-in grows with these factors, and the same backbuffer now covers
+// more degrees, so the image softens. PgDn trades field back for sharpness.
+float g_fov_widen_x = 1.0f;
+float g_fov_widen_y = 1.0f;
+float g_fov_manual  = 1.0f;   // PgUp/PgDn multiplier on top of auto
+bool  g_fov_auto    = true;
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
 
@@ -196,6 +208,52 @@ bool invert(const Mat4 m, Mat4 out)
     det = 1.0f / det;
     for (int i = 0; i < 16; ++i) out[i] = inv[i] * det;
     return true;
+}
+
+// The game's native (un-widened) projection half-angle tangents, recovered
+// from VP: rows 0/1 are rotation rows scaled by the projection's x/y factors,
+// so tangent = 1/|row|.
+bool base_tangents(float& th, float& tv)
+{
+    if (!g_have_vp) return false;
+    const float lx = std::sqrt(g_vp[0]*g_vp[0] + g_vp[1]*g_vp[1] + g_vp[2]*g_vp[2]);
+    const float ly = std::sqrt(g_vp[4]*g_vp[4] + g_vp[5]*g_vp[5] + g_vp[6]*g_vp[6]);
+    if (lx < 1e-6f || ly < 1e-6f) return false;
+    th = 1.0f / lx;
+    tv = 1.0f / ly;
+    return true;
+}
+
+// Match the rendered field to the headset's frustum, per axis. Recomputed
+// rarely - the frustum is a device constant, but VP is only known once the
+// game starts drawing.
+void update_auto_fov()
+{
+    if (!g_fov_auto) return;
+    auto* sys = vrtrack::system();
+    if (!sys) return;
+
+    float th = 0.0f, tv = 0.0f;
+    if (!base_tangents(th, tv)) return;
+
+    float need_h = 0.0f, need_v = 0.0f;
+    for (int e = 0; e < 2; ++e) {
+        float l, r, t, b;
+        sys->GetProjectionRaw(e == 0 ? vr::Eye_Left : vr::Eye_Right, &l, &r, &t, &b);
+        need_h = (std::max)(need_h, (std::max)(std::fabs(l), std::fabs(r)));
+        need_v = (std::max)(need_v, (std::max)(std::fabs(t), std::fabs(b)));
+    }
+    if (need_h < 1e-6f || need_v < 1e-6f) return;
+
+    const float wx = (std::min)((std::max)(need_h / th, 1.0f), 3.0f);
+    const float wy = (std::min)((std::max)(need_v / tv, 1.0f), 4.0f);
+
+    if (std::fabs(wx - g_fov_widen_x) > 0.01f || std::fabs(wy - g_fov_widen_y) > 0.01f) {
+        g_fov_widen_x = wx;
+        g_fov_widen_y = wy;
+        VRLOG("[fov] auto: game tangents h=%.4f v=%.4f, headset needs h=%.4f v=%.4f -> widen %.2fx / %.2fx",
+              th, tv, need_h, need_v, wx, wy);
+    }
 }
 
 bool key_pressed(int vk)
@@ -305,7 +363,9 @@ void rebuild_correction()
     // into world space. Scaling camera x/y by 1/widen before projection makes
     // the same image cover widen-times the field. V and M_cw carry the eye
     // position, so no extra recentering is needed.
-    if (g_fov_widen > 1.001f && g_have_eye) {
+    const float wx = g_fov_widen_x * g_fov_manual;
+    const float wy = g_fov_widen_y * g_fov_manual;
+    if ((wx > 1.001f || wy > 1.001f) && g_have_eye) {
         Mat4 mcw, view, scale, tmp2, k;
         identity(mcw);
         for (int r2 = 0; r2 < 3; ++r2)
@@ -326,8 +386,8 @@ void rebuild_correction()
         }
 
         identity(scale);
-        at(scale, 0, 0) = 1.0f / g_fov_widen;
-        at(scale, 1, 1) = 1.0f / g_fov_widen;
+        at(scale, 0, 0) = 1.0f / wx;
+        at(scale, 1, 1) = 1.0f / wy;
 
         multiply(view, scale, tmp2);
         multiply(tmp2, mcw, k);
@@ -456,6 +516,8 @@ void on_present()
         VRLOG("[vr] auto-engaged - HMD pose available");
     }
 
+    update_auto_fov();
+
     // Auto-IPD: track the headset's real setting until the user goes manual.
     if (!g_ipd_manual) {
         const float real = vrtrack::user_ipd_meters();
@@ -544,14 +606,15 @@ void on_present()
         }
     }
 
-    // FOV widening (PgUp wider / PgDn narrower).
+    // FOV trim on top of the automatic match (PgUp wider / PgDn narrower).
+    // PgDn trades field for sharpness and less edge pop-in.
     if (key_pressed(VK_PRIOR)) {
-        g_fov_widen = (g_fov_widen + 0.1f > 2.0f) ? 2.0f : g_fov_widen + 0.1f;
-        VRLOG("[fov] widen -> %.1fx", g_fov_widen);
+        g_fov_manual = (std::min)(g_fov_manual + 0.05f, 1.5f);
+        VRLOG("[fov] trim -> %.2fx (auto %.2f/%.2f)", g_fov_manual, g_fov_widen_x, g_fov_widen_y);
     }
     if (key_pressed(VK_NEXT)) {
-        g_fov_widen = (g_fov_widen - 0.1f < 1.0f) ? 1.0f : g_fov_widen - 0.1f;
-        VRLOG("[fov] widen -> %.1fx", g_fov_widen);
+        g_fov_manual = (std::max)(g_fov_manual - 0.05f, 0.5f);
+        VRLOG("[fov] trim -> %.2fx (auto %.2f/%.2f)", g_fov_manual, g_fov_widen_x, g_fov_widen_y);
     }
 
     // Stereo calibration.
@@ -587,16 +650,12 @@ unsigned modified_last_frame() { return g_modified_last_frame; }
 
 bool game_proj_tangents(float& tan_half_h, float& tan_half_v)
 {
-    if (!g_have_vp) return false;
-    // VP = View * Proj with View's 3x3 a pure rotation, so |VP row0| = proj
-    // x-scale and |VP row1| = proj y-scale; tangent is the reciprocal.
-    const float lx = std::sqrt(g_vp[0]*g_vp[0] + g_vp[1]*g_vp[1] + g_vp[2]*g_vp[2]);
-    const float ly = std::sqrt(g_vp[4]*g_vp[4] + g_vp[5]*g_vp[5] + g_vp[6]*g_vp[6]);
-    if (lx < 1e-6f || ly < 1e-6f) return false;
-    // Widened rendering covers widen-times the field; the bounds must match
-    // the image actually submitted, not the game's native projection.
-    tan_half_h = g_fov_widen / lx;
-    tan_half_v = g_fov_widen / ly;
+    float th = 0.0f, tv = 0.0f;
+    if (!base_tangents(th, tv)) return false;
+    // Report the field ACTUALLY submitted, not the game's native projection,
+    // so the compositor's bounds track the widened image.
+    tan_half_h = th * g_fov_widen_x * g_fov_manual;
+    tan_half_v = tv * g_fov_widen_y * g_fov_manual;
     return true;
 }
 
