@@ -36,6 +36,14 @@ float g_pitch_sign   = -1.0f;
 float g_hmd_yaw      = 0.0f;    // current delta, radians
 float g_hmd_pitch    = 0.0f;
 
+// 6DOF. The HMD's positional delta from its reference, mapped through the game
+// camera's basis into world space. Frostbite is metric and OpenVR reports
+// meters, so this is 1:1 - lean 20cm in the room, lean 20cm in the world.
+// END toggles; F5 recenters position along with orientation.
+bool  g_pos_enabled  = true;
+float g_ref_pos[3]   = {};
+float g_hmd_dpos[3]  = {};      // delta in OpenVR axes (+X right, +Y up, -Z fwd)
+
 // Alternate-eye rendering state. The IPD is in WORLD units and the engine's
 // world scale is not yet measured, so it is runtime-adjustable: if the world
 // feels like a miniature, the offset is too big; like a giant's world, too
@@ -130,10 +138,12 @@ bool  g_fov_auto    = true;
 // camera's forward axis - moved out, not scaled, so it subtends a smaller
 // angle the way a real arm's-length object would.
 // Minus/Equals keys tune it live.
-float g_vm_push   = 0.30f;   // world units (meters) forward
-float g_vm_radius = 1.20f;   // treat draws inside this as viewmodel
+float g_vm_push   = 0.45f;   // world units (meters) forward
+float g_vm_radius = 2.00f;   // treat draws inside this as viewmodel
 float g_correction_near[16] = {};
 bool  g_have_correction_near = false;
+unsigned g_vm_hits = 0, g_vm_hits_last = 0;   // did detection actually fire?
+float    g_vm_nearest = 1e9f, g_vm_nearest_last = 0.0f;
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
 
@@ -284,7 +294,16 @@ bool is_near_camera(const float* stored_block)
     const float dx = at(world, 3, 0) / w - g_eye[0];
     const float dy = at(world, 3, 1) / w - g_eye[1];
     const float dz = at(world, 3, 2) / w - g_eye[2];
-    return (dx*dx + dy*dy + dz*dz) < (g_vm_radius * g_vm_radius);
+
+    // Track the closest draw seen, so the log says whether ANY geometry is
+    // near the camera - if the nearest is metres away, the viewmodel's world
+    // matrix does not encode its position and distance is the wrong test.
+    const float d2 = dx*dx + dy*dy + dz*dz;
+    const float d  = std::sqrt(d2);
+    if (d < g_vm_nearest) g_vm_nearest = d;
+
+    if (d2 < (g_vm_radius * g_vm_radius)) { ++g_vm_hits; return true; }
+    return false;
 }
 
 bool key_pressed(int vk)
@@ -389,6 +408,25 @@ void rebuild_correction()
     translation(g_eye[0], g_eye[1], g_eye[2], back);
     multiply(to_origin, rot, tmp);
     multiply(tmp, back, r);          // rotate about the eye, not the origin
+
+    // 6DOF: map the head's positional delta through the camera basis and move
+    // the WORLD the opposite way, which is the same as moving the camera.
+    // OpenVR is +X right / +Y up / -Z forward, hence the negated Z term.
+    if (g_pos_enabled && g_hmd_active) {
+        const float* right = &g_cam_rows[0];
+        const float* up    = &g_cam_rows[3];
+        const float* fwd   = &g_cam_rows[6];
+        float off[3];
+        for (int i = 0; i < 3; ++i) {
+            off[i] = g_hmd_dpos[0] * right[i]
+                   + g_hmd_dpos[1] * up[i]
+                   + (-g_hmd_dpos[2]) * fwd[i];
+        }
+        Mat4 move, r2;
+        translation(-off[0], -off[1], -off[2], move);
+        multiply(r, move, r2);
+        std::memcpy(r, r2, sizeof(r));
+    }
 
     // FOV widening: K = V * S * M_cw, a camera-space lateral shrink conjugated
     // into world space. Scaling camera x/y by 1/widen before projection makes
@@ -580,14 +618,18 @@ void on_present()
     if (g_correct_on && vrtrack::have_pose()) {
         float yaw, pitch;
         hmd_yaw_pitch(yaw, pitch);
+        float pos[3];
+        vrtrack::position(pos);
         if (!g_hmd_active) {
             g_hmd_active = true;
             g_ref_yaw = yaw; g_ref_pitch = pitch;
-            VRLOG("[vr] head tracking engaged (ref yaw=%.1f pitch=%.1f deg)",
-                  yaw * 180.0f / kPi, pitch * 180.0f / kPi);
+            std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
+            VRLOG("[vr] head tracking engaged (ref yaw=%.1f pitch=%.1f deg, pos %.2f/%.2f/%.2f)",
+                  yaw * 180.0f / kPi, pitch * 180.0f / kPi, pos[0], pos[1], pos[2]);
         }
         g_hmd_yaw   = yaw   - g_ref_yaw;
         g_hmd_pitch = pitch - g_ref_pitch;
+        for (int i = 0; i < 3; ++i) g_hmd_dpos[i] = pos[i] - g_ref_pos[i];
     } else if (g_hmd_active && !g_correct_on) {
         g_hmd_active = false;
         VRLOG("[vr] head tracking disengaged");
@@ -604,10 +646,17 @@ void on_present()
 
     static unsigned frames = 0;
     ++frames;
+    g_vm_hits_last    = g_vm_hits;
+    g_vm_nearest_last = (g_vm_nearest < 1e8f) ? g_vm_nearest : -1.0f;
+    g_vm_hits = 0;
+    g_vm_nearest = 1e9f;
+
     if (g_correct_on && frames % 300 == 0) {
         VRLOG("[correct] %s: modified %u transform writes last frame (fingerprints: %u found, %u none)",
               g_transposed ? "transposed" : "row-registers", g_modified_last_frame,
               g_fp_found, g_fp_rejected);
+        VRLOG("[viewmodel] push=%.2fm radius=%.2fm: %u draws matched, nearest draw %.3fm",
+              g_vm_push, g_vm_radius, g_vm_hits_last, g_vm_nearest_last);
     }
 
     // Stereo phase forensics: eye parity vs corrected-write count per frame.
@@ -647,10 +696,12 @@ void on_present()
     if (key_pressed(VK_F5)) {
         g_angle_rad = 0.0f;
         if (g_hmd_active) {
-            float yaw, pitch;
+            float yaw, pitch, pos[3];
             hmd_yaw_pitch(yaw, pitch);
+            vrtrack::position(pos);
             g_ref_yaw = yaw; g_ref_pitch = pitch;
-            VRLOG("[vr] reference recentered");
+            std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
+            VRLOG("[vr] reference recentered (orientation + position)");
         } else {
             VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
         }
@@ -665,6 +716,11 @@ void on_present()
     if (key_pressed(VK_NEXT)) {
         g_fov_manual = (std::max)(g_fov_manual - 0.05f, 0.5f);
         VRLOG("[fov] trim -> %.2fx (auto %.2f/%.2f)", g_fov_manual, g_fov_widen_x, g_fov_widen_y);
+    }
+
+    if (key_pressed(VK_END)) {
+        g_pos_enabled = !g_pos_enabled;
+        VRLOG("[vr] 6DOF position %s", g_pos_enabled ? "ON" : "off (orientation only)");
     }
 
     // Viewmodel distance: '-' pulls the gun closer, '=' pushes it away.

@@ -41,6 +41,10 @@ bool have_pose();
 // -Z-forward convention, relative to the seated/standing origin.
 void orientation(float out3x3[9]);
 
+// HMD position in meters, same convention (+X right, +Y up, -Z forward),
+// relative to the standing-universe origin. Drives 6DOF.
+void position(float out3[3]);
+
 void shutdown();
 
 // The live IVRSystem, or null before init. Needed by the compositor path for

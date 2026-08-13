@@ -13,10 +13,12 @@ bool  g_tried_recently = false;
 ULONGLONG g_last_try = 0;
 bool  g_have_pose = false;
 float g_rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
+float g_pos[3] = { 0,0,0 };
 
 // Render pose delivered by the compositor loop (see header).
 bool  g_have_render_pose = false;
 float g_render_rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
+float g_render_pos[3] = { 0,0,0 };
 
 } // namespace
 
@@ -27,6 +29,8 @@ void set_render_pose(const vr::HmdMatrix34_t& pose, bool valid)
     g_render_rot[0] = m[0][0]; g_render_rot[1] = m[0][1]; g_render_rot[2] = m[0][2];
     g_render_rot[3] = m[1][0]; g_render_rot[4] = m[1][1]; g_render_rot[5] = m[1][2];
     g_render_rot[6] = m[2][0]; g_render_rot[7] = m[2][1]; g_render_rot[8] = m[2][2];
+    // Column 3 of the 3x4 device-to-absolute transform is the position.
+    g_render_pos[0] = m[0][3]; g_render_pos[1] = m[1][3]; g_render_pos[2] = m[2][3];
     g_have_render_pose = true;
 }
 
@@ -91,6 +95,7 @@ void update()
     // stalled compositor loop falls back to sampling instead of freezing.
     if (g_have_render_pose) {
         std::memcpy(g_rot, g_render_rot, sizeof(g_rot));
+        std::memcpy(g_pos, g_render_pos, sizeof(g_pos));
         g_have_render_pose = false;
         g_have_pose = true;
         return;
@@ -109,6 +114,7 @@ void update()
     g_rot[0] = m[0][0]; g_rot[1] = m[0][1]; g_rot[2] = m[0][2];
     g_rot[3] = m[1][0]; g_rot[4] = m[1][1]; g_rot[5] = m[1][2];
     g_rot[6] = m[2][0]; g_rot[7] = m[2][1]; g_rot[8] = m[2][2];
+    g_pos[0] = m[0][3]; g_pos[1] = m[1][3]; g_pos[2] = m[2][3];
     g_have_pose = true;
 }
 
@@ -117,6 +123,11 @@ bool have_pose() { return g_have_pose; }
 void orientation(float out3x3[9])
 {
     std::memcpy(out3x3, g_rot, sizeof(g_rot));
+}
+
+void position(float out3[3])
+{
+    std::memcpy(out3, g_pos, sizeof(g_pos));
 }
 
 vr::IVRSystem* system() { return g_system; }
