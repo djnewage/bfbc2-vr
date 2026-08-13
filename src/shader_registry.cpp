@@ -36,7 +36,17 @@ struct ConstantInfo {
 struct ShaderInfo {
     // name -> (first register, register count), float constants only
     std::map<std::string, std::pair<unsigned, unsigned>> constants;
+
+    // Pre-resolved clip-space transform spans, so the per-write hot path is an
+    // array read instead of string lookups under a lock.
+    Span     transform_spans[kMaxSpans];
+    size_t   transform_span_count = 0;
 };
+
+bool is_transform_name(const std::string& n)
+{
+    return n == "worldViewProj" || n == "worldViewProjMatrix" || n == "viewProjMatrix";
+}
 
 std::mutex g_mutex;
 std::map<IDirect3DVertexShader9*, ShaderInfo> g_shaders;
@@ -120,6 +130,15 @@ void on_create_vertex_shader(const DWORD* bytecode, IDirect3DVertexShader9* shad
 
         info.constants[name] = { consts[c].register_index, consts[c].register_count };
         g_name_spans[name].insert({ consts[c].register_index, consts[c].register_count });
+
+        // A clip-space transform must be a full 4x4 - four registers. CTAB
+        // shows viewMatrix spans of 2, which would be a packed partial matrix;
+        // refuse anything that is not exactly 4 rather than corrupt it.
+        if (is_transform_name(name) && consts[c].register_count == 4 &&
+            info.transform_span_count < kMaxSpans) {
+            info.transform_spans[info.transform_span_count++] =
+                { consts[c].register_index, consts[c].register_count };
+        }
     }
 
     g_shaders[shader] = std::move(info);
@@ -129,6 +148,19 @@ void on_create_vertex_shader(const DWORD* bytecode, IDirect3DVertexShader9* shad
 void on_set_vertex_shader(IDirect3DVertexShader9* shader)
 {
     t_active = shader;
+}
+
+size_t active_transform_spans(Span out[kMaxSpans])
+{
+    if (!t_active) return 0;
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_shaders.find(t_active);
+    if (it == g_shaders.end()) return 0;
+
+    const ShaderInfo& info = it->second;
+    for (size_t i = 0; i < info.transform_span_count; ++i) out[i] = info.transform_spans[i];
+    return info.transform_span_count;
 }
 
 void on_present()

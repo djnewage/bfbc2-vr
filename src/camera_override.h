@@ -30,10 +30,20 @@
 // This is also exactly the mechanism Phases 4 and 5 need: substituting a
 // per-eye projection or an HMD pose is just a different R.
 //
-// PROBE CONTROLS - sweep the register file to find what drives the picture:
-//   F7  toggle the probe on/off
-//   F8  probe base + 1        (watch the log for the current base)
-//   F6  probe base - 1
+// TARGETING (2026-08-13, post-CTAB): fixed-register probing is gone. The
+// correction now applies only to shaders whose own constant table declares a
+// clip-space transform (worldViewProj / worldViewProjMatrix / viewProjMatrix),
+// at exactly the registers the table names. Bone palettes and packed params
+// never get touched, because those shaders do not declare these names.
+//
+// CONVENTION: the rolled-but-coherent world in the recording is the signature
+// of a transposed-matrix mismatch. HLSL packs matrices column-major into
+// registers by default (stored block = M^T), in which case the correction must
+// be applied as S' = C^T * S rather than S' = S * C. Both modes are one key
+// apart; the one that yaws the world cleanly about a vertical axis is correct.
+//
+//   F7  toggle the correction on/off
+//   F8  toggle convention: transposed <-> row-registers
 //   F5  reset the synthetic angle
 #pragma once
 
@@ -41,13 +51,10 @@
 
 namespace camover {
 
-// Register blocks located in Phase 2. See docs/phase2-results.md.
+// Global camera blocks from Phase 2 - still tracked as the SOURCE for building
+// the correction (VP and eye position), no longer used as override targets.
 constexpr unsigned kViewProjBase = 185;   // c185..c188, view-projection
 constexpr unsigned kCamWorldBase = 189;   // c189..c192, camera-to-world
-
-// Default probe start: the per-draw block, the prime suspect for the real
-// world-view-projection.
-constexpr unsigned kProbeDefault = 6;
 
 // If this write covers the probed block, fills `scratch` with a corrected copy
 // and returns true; the caller forwards `scratch` instead of the game's buffer.

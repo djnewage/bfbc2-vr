@@ -32,4 +32,17 @@ void on_set_vertex_shader(IDirect3DVertexShader9* shader);
 // Called per Present: occasionally flushes newly seen constant names to the log.
 void on_present();
 
+// Transform spans declared by the ACTIVE shader's own constant table.
+// CTAB evidence (65 shaders, 0 stripped): the names below mark the matrices
+// that end in clip space, which is exactly what the clip-space correction
+// applies to. worldMatrix/viewMatrix are deliberately absent - correcting a
+// world matrix with a clip-space correction would be wrong.
+//
+//   worldViewProj / worldViewProjMatrix / viewProjMatrix
+//
+// Returns the number of spans written to out[] (0 if none / no active shader).
+struct Span { unsigned start; unsigned count; };
+constexpr size_t kMaxSpans = 4;
+size_t active_transform_spans(Span out[kMaxSpans]);
+
 } // namespace shaderreg

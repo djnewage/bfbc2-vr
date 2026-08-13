@@ -1,4 +1,5 @@
 #include "camera_override.h"
+#include "shader_registry.h"
 #include "logger.h"
 
 #include <windows.h>
@@ -11,9 +12,9 @@ namespace {
 constexpr float kPi = 3.14159265358979f;
 constexpr float kDegPerSecond = 25.0f;   // slow enough to read as deliberate
 
-bool     g_probe_on   = false;
-unsigned g_probe_base = kProbeDefault;
-float    g_angle_rad  = 0.0f;
+bool  g_correct_on = false;
+bool  g_transposed = true;    // HLSL default packing is column-major (stored = M^T)
+float g_angle_rad  = 0.0f;
 
 // Write-pattern evidence. "Which (start,count) shapes arrive per frame, and
 // how many did the probe actually modify?" separates a base that hits one
@@ -69,6 +70,13 @@ void rotation_y(float rad, Mat4 m)
     const float s = std::sin(rad), c = std::cos(rad);
     at(m, 0, 0) =  c; at(m, 0, 2) = -s;
     at(m, 2, 0) =  s; at(m, 2, 2) =  c;
+}
+
+void transpose(const Mat4 m, Mat4 out)
+{
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            at(out, r, c) = at(m, c, r);
 }
 
 void translation(float x, float y, float z, Mat4 m)
@@ -173,17 +181,37 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
         g_have_eye = true;
     }
 
-    if (!g_probe_on || !g_have_correction) return false;
-    if (!covers(start_register, vec4_count, g_probe_base)) return false;
+    if (!g_correct_on || !g_have_correction) return false;
 
-    scratch.assign(data, data + vec4_count * 4);
+    // Only the spans the ACTIVE shader's own constant table declares as
+    // clip-space transforms. No declaration, no touch.
+    shaderreg::Span spans[shaderreg::kMaxSpans];
+    const size_t n = shaderreg::active_transform_spans(spans);
+    if (n == 0) return false;
 
-    float* target = scratch.data() + (g_probe_base - start_register) * 4;
-    Mat4 out;
-    multiply(reinterpret_cast<const float(&)[16]>(*target), g_correction, out);
-    std::memcpy(target, out, sizeof(out));
-    ++g_modified_this_frame;
-    return true;
+    bool any = false;
+    for (size_t s = 0; s < n; ++s) {
+        if (!covers(start_register, vec4_count, spans[s].start)) continue;
+
+        if (!any) scratch.assign(data, data + vec4_count * 4);
+        any = true;
+
+        float* target = scratch.data() + (spans[s].start - start_register) * 4;
+        Mat4 out;
+        if (g_transposed) {
+            // Stored block is M^T (HLSL column-major packing):
+            //   (M * C)^T = C^T * M^T  ->  left-multiply by C^T
+            Mat4 ct;
+            transpose(g_correction, ct);
+            multiply(ct, reinterpret_cast<const float(&)[16]>(*target), out);
+        } else {
+            // Stored block is M row-by-row: right-multiply as derived.
+            multiply(reinterpret_cast<const float(&)[16]>(*target), g_correction, out);
+        }
+        std::memcpy(target, out, sizeof(out));
+        ++g_modified_this_frame;
+    }
+    return any;
 }
 
 void on_present()
@@ -193,7 +221,7 @@ void on_present()
     const float dt = last_tick ? (now - last_tick) / 1000.0f : 0.0f;
     last_tick = now;
 
-    if (g_probe_on) {
+    if (g_correct_on) {
         g_angle_rad += dt * kDegPerSecond * kPi / 180.0f;
         if (g_angle_rad > 2.0f * kPi) g_angle_rad -= 2.0f * kPi;
     }
@@ -202,41 +230,29 @@ void on_present()
     g_modified_last_frame = g_modified_this_frame;
     g_modified_this_frame = 0;
 
-    // Evidence heartbeat: write shapes + how much the probe touched. Every 300
-    // frames while probing, so a slow manual sweep leaves a readable trail.
     static unsigned frames = 0;
     ++frames;
-    if (g_probe_on && frames % 300 == 0) {
-        VRLOG("[probe] base c%u: modified %u writes last frame", g_probe_base, g_modified_last_frame);
-        for (size_t i = 0; i < g_shape_count; ++i) {
-            if (g_shapes[i].calls > 0) {
-                VRLOG("[shapes]   start=c%-3u count=%-3u  x%u/frame",
-                      g_shapes[i].start, g_shapes[i].count, g_shapes[i].calls);
-            }
-            g_shapes[i].calls = 0;
-        }
-    } else if (frames % 300 == 0) {
+    if (g_correct_on && frames % 300 == 0) {
+        VRLOG("[correct] %s: modified %u transform writes last frame",
+              g_transposed ? "transposed" : "row-registers", g_modified_last_frame);
+    }
+    if (frames % 300 == 0) {
         for (size_t i = 0; i < g_shape_count; ++i) g_shapes[i].calls = 0;
     }
 
     if (key_pressed(VK_F7)) {
-        g_probe_on = !g_probe_on;
-        VRLOG("[probe] %s at base c%u  (vp=%d eye=%d correction=%d, modified %u last frame)",
-              g_probe_on ? "ON" : "off", g_probe_base,
-              (int)g_have_vp, (int)g_have_eye, (int)g_have_correction, g_modified_last_frame);
+        g_correct_on = !g_correct_on;
+        VRLOG("[correct] %s  (convention=%s, vp=%d eye=%d correction=%d)",
+              g_correct_on ? "ON" : "off", g_transposed ? "transposed" : "row-registers",
+              (int)g_have_vp, (int)g_have_eye, (int)g_have_correction);
     }
     if (key_pressed(VK_F8)) {
-        ++g_probe_base;
-        VRLOG("[probe] base -> c%u   %s", g_probe_base, g_probe_on ? "(probe ON)" : "(probe off - press F7)");
-    }
-    if (key_pressed(VK_F6)) {
-        if (g_probe_base > 0) --g_probe_base;
-        VRLOG("[probe] base -> c%u   %s", g_probe_base, g_probe_on ? "(probe ON)" : "(probe off - press F7)");
+        g_transposed = !g_transposed;
+        VRLOG("[correct] convention -> %s", g_transposed ? "transposed" : "row-registers");
     }
     if (key_pressed(VK_F5)) {
         g_angle_rad = 0.0f;
-        VRLOG("[probe] angle reset; base c%u, eye=(%.2f, %.2f, %.2f)",
-              g_probe_base, g_eye[0], g_eye[1], g_eye[2]);
+        VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
     }
 }
 
