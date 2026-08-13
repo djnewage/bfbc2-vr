@@ -122,6 +122,18 @@ float g_fov_widen_x = 1.0f;
 float g_fov_widen_y = 1.0f;
 float g_fov_manual  = 1.0f;   // PgUp/PgDn multiplier on top of auto
 bool  g_fov_auto    = true;
+
+// Viewmodel push. Flat FPS games compose the first-person weapon for a 2D
+// screen and park it ~30cm from the camera; at true VR scale that is against
+// your face. Real VR puts a held weapon at arm's length. Draws whose recovered
+// world position sits within kRadius of the eye get an extra shove along the
+// camera's forward axis - moved out, not scaled, so it subtends a smaller
+// angle the way a real arm's-length object would.
+// Minus/Equals keys tune it live.
+float g_vm_push   = 0.30f;   // world units (meters) forward
+float g_vm_radius = 1.20f;   // treat draws inside this as viewmodel
+float g_correction_near[16] = {};
+bool  g_have_correction_near = false;
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
 
@@ -254,6 +266,25 @@ void update_auto_fov()
         VRLOG("[fov] auto: game tangents h=%.4f v=%.4f, headset needs h=%.4f v=%.4f -> widen %.2fx / %.2fx",
               th, tv, need_h, need_v, wx, wy);
     }
+}
+
+// Is this stored transform block a draw sitting right on top of the camera?
+// World = WVP * VP^-1, and its translation row is the object's world position.
+bool is_near_camera(const float* stored_block)
+{
+    if (!g_have_vp_inv || !g_have_eye) return false;
+
+    Mat4 wvp, world;
+    if (g_transposed) transpose(reinterpret_cast<const float(&)[16]>(*stored_block), wvp);
+    else              std::memcpy(wvp, stored_block, sizeof(wvp));
+    multiply(wvp, g_vp_inv, world);
+
+    const float w = at(world, 3, 3);
+    if (std::fabs(w) < 1e-4f) return false;
+    const float dx = at(world, 3, 0) / w - g_eye[0];
+    const float dy = at(world, 3, 1) / w - g_eye[1];
+    const float dz = at(world, 3, 2) / w - g_eye[2];
+    return (dx*dx + dy*dy + dz*dz) < (g_vm_radius * g_vm_radius);
 }
 
 bool key_pressed(int vk)
@@ -414,6 +445,19 @@ void rebuild_correction()
     multiply(vp_inv, r, tmp);
     multiply(tmp, g_vp, g_correction);
     g_have_correction = true;
+
+    // Second correction for near-camera draws: the same transform with an
+    // extra world-space shove along the camera's forward axis.
+    g_have_correction_near = false;
+    if (g_vm_push > 0.001f && g_have_eye) {
+        const float* fwd = &g_cam_rows[6];   // camera-to-world row 2 = forward
+        Mat4 push, r_near, tmp3;
+        translation(fwd[0] * g_vm_push, fwd[1] * g_vm_push, fwd[2] * g_vm_push, push);
+        multiply(push, r, r_near);           // push first, then the VR transform
+        multiply(vp_inv, r_near, tmp3);
+        multiply(tmp3, g_vp, g_correction_near);
+        g_have_correction_near = true;
+    }
 }
 
 } // namespace
@@ -465,16 +509,22 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
         any = true;
 
         float* target = scratch.data() + (spans[s].start - start_register) * 4;
+
+        // Viewmodel draws take the pushed-out correction.
+        const float* corr = g_correction;
+        if (g_have_correction_near && is_near_camera(target)) corr = g_correction_near;
+
         Mat4 out;
         if (g_transposed) {
             // Stored block is M^T (HLSL column-major packing):
             //   (M * C)^T = C^T * M^T  ->  left-multiply by C^T
             Mat4 ct;
-            transpose(g_correction, ct);
+            transpose(reinterpret_cast<const float(&)[16]>(*corr), ct);
             multiply(ct, reinterpret_cast<const float(&)[16]>(*target), out);
         } else {
             // Stored block is M row-by-row: right-multiply as derived.
-            multiply(reinterpret_cast<const float(&)[16]>(*target), g_correction, out);
+            multiply(reinterpret_cast<const float(&)[16]>(*target),
+                     reinterpret_cast<const float(&)[16]>(*corr), out);
         }
         std::memcpy(target, out, sizeof(out));
         ++g_modified_this_frame;
@@ -615,6 +665,16 @@ void on_present()
     if (key_pressed(VK_NEXT)) {
         g_fov_manual = (std::max)(g_fov_manual - 0.05f, 0.5f);
         VRLOG("[fov] trim -> %.2fx (auto %.2f/%.2f)", g_fov_manual, g_fov_widen_x, g_fov_widen_y);
+    }
+
+    // Viewmodel distance: '-' pulls the gun closer, '=' pushes it away.
+    if (key_pressed(VK_OEM_MINUS)) {
+        g_vm_push = (std::max)(g_vm_push - 0.05f, 0.0f);
+        VRLOG("[viewmodel] push -> %.2f m%s", g_vm_push, g_vm_push == 0.0f ? " (off)" : "");
+    }
+    if (key_pressed(VK_OEM_PLUS)) {
+        g_vm_push = (std::min)(g_vm_push + 0.05f, 1.0f);
+        VRLOG("[viewmodel] push -> %.2f m", g_vm_push);
     }
 
     // Stereo calibration.
