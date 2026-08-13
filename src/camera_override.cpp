@@ -15,6 +15,25 @@ bool     g_probe_on   = false;
 unsigned g_probe_base = kProbeDefault;
 float    g_angle_rad  = 0.0f;
 
+// Write-pattern evidence. "Which (start,count) shapes arrive per frame, and
+// how many did the probe actually modify?" separates a base that hits one
+// consistent matrix slot from one that corrupts mixed data - the difference
+// between the world rotating and the screen tearing.
+struct WriteShape { unsigned start, count, calls; };
+constexpr size_t kMaxShapes = 32;
+WriteShape g_shapes[kMaxShapes];
+size_t     g_shape_count    = 0;
+unsigned   g_modified_this_frame = 0;
+unsigned   g_modified_last_frame = 0;
+
+void note_shape(unsigned start, unsigned count)
+{
+    for (size_t i = 0; i < g_shape_count; ++i) {
+        if (g_shapes[i].start == start && g_shapes[i].count == count) { ++g_shapes[i].calls; return; }
+    }
+    if (g_shape_count < kMaxShapes) g_shapes[g_shape_count++] = { start, count, 1 };
+}
+
 // Row-major, row-vector convention (v' = v * M) - what Phase 2 measured.
 using Mat4 = float[16];
 
@@ -140,6 +159,8 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
 {
     if (!data || vec4_count == 0) return false;
 
+    note_shape(start_register, vec4_count);
+
     // Keep VP and eye current regardless of probe state - the correction is
     // built from them and they must track the game's real camera.
     if (covers(start_register, vec4_count, kViewProjBase)) {
@@ -161,6 +182,7 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
     Mat4 out;
     multiply(reinterpret_cast<const float(&)[16]>(*target), g_correction, out);
     std::memcpy(target, out, sizeof(out));
+    ++g_modified_this_frame;
     return true;
 }
 
@@ -177,11 +199,31 @@ void on_present()
     }
     rebuild_correction();
 
+    g_modified_last_frame = g_modified_this_frame;
+    g_modified_this_frame = 0;
+
+    // Evidence heartbeat: write shapes + how much the probe touched. Every 300
+    // frames while probing, so a slow manual sweep leaves a readable trail.
+    static unsigned frames = 0;
+    ++frames;
+    if (g_probe_on && frames % 300 == 0) {
+        VRLOG("[probe] base c%u: modified %u writes last frame", g_probe_base, g_modified_last_frame);
+        for (size_t i = 0; i < g_shape_count; ++i) {
+            if (g_shapes[i].calls > 0) {
+                VRLOG("[shapes]   start=c%-3u count=%-3u  x%u/frame",
+                      g_shapes[i].start, g_shapes[i].count, g_shapes[i].calls);
+            }
+            g_shapes[i].calls = 0;
+        }
+    } else if (frames % 300 == 0) {
+        for (size_t i = 0; i < g_shape_count; ++i) g_shapes[i].calls = 0;
+    }
+
     if (key_pressed(VK_F7)) {
         g_probe_on = !g_probe_on;
-        VRLOG("[probe] %s at base c%u  (vp=%d eye=%d correction=%d)",
+        VRLOG("[probe] %s at base c%u  (vp=%d eye=%d correction=%d, modified %u last frame)",
               g_probe_on ? "ON" : "off", g_probe_base,
-              (int)g_have_vp, (int)g_have_eye, (int)g_have_correction);
+              (int)g_have_vp, (int)g_have_eye, (int)g_have_correction, g_modified_last_frame);
     }
     if (key_pressed(VK_F8)) {
         ++g_probe_base;
