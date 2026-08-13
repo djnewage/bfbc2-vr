@@ -12,6 +12,22 @@
 // Registers that change when the camera rotates and nothing else moves are the
 // view transform. Repeat with an ADS toggle instead of a rotation to isolate
 // projection, since that changes FOV rather than orientation.
+//
+// STABILITY TRACKING
+//
+// Measured on BFBC2: ~5900 vec4 writes per frame across only c0..c18. The game
+// recycles the same small register block for every draw call, so a plain
+// snapshot captures whatever the last draw happened to leave behind - usually a
+// per-object matrix, not the camera.
+//
+// The separator is how a register behaves WITHIN one frame:
+//   STABLE  - written many times but always the same value for the whole frame.
+//             Camera-ish: view, projection, view-projection, fog, time.
+//   VARYING - takes different values during a single frame.
+//             Per-object: world matrices, bone palettes, per-material data.
+//
+// The camera lives in a register that is STABLE within a frame but CHANGES
+// between frames when you move. That pair of conditions is the actual signal.
 #pragma once
 
 #include <cstddef>

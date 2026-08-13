@@ -19,6 +19,15 @@ float g_baseline[kMaxRegisters][4] = {};
 bool  g_written[kMaxRegisters]     = {};   // has this register ever been set?
 bool  g_have_baseline = false;
 
+// Within-frame stability. See the header for why this is the signal that
+// separates camera constants from per-object ones.
+float    g_frame_first[kMaxRegisters][4] = {};
+bool     g_seen_this_frame[kMaxRegisters]   = {};
+bool     g_varied_this_frame[kMaxRegisters] = {};
+bool     g_varied_last_frame[kMaxRegisters] = {};
+unsigned g_writes[kMaxRegisters]            = {};   // writes during the last complete frame
+unsigned g_writes_accum[kMaxRegisters]      = {};
+
 unsigned g_highest_register = 0;
 unsigned g_writes_this_frame = 0;
 unsigned g_frame = 0;
@@ -111,15 +120,35 @@ FILE* open_dump(const char* kind, char* path_out, size_t path_size)
     return f;
 }
 
+const char* stability_tag(unsigned i)
+{
+    if (!g_writes[i])            return "  -    ";   // untouched last frame
+    if (g_varied_last_frame[i])  return "VARYING";   // per-object: world, bones
+    return "STABLE ";                                // camera-ish candidate
+}
+
 void write_register(FILE* f, unsigned i)
 {
     char note[160];
-    fprintf(f, "c%-3u  % 12.5f % 12.5f % 12.5f % 12.5f", i, g_regs[i][0], g_regs[i][1], g_regs[i][2], g_regs[i][3]);
+    fprintf(f, "c%-3u %s x%-5u % 12.5f % 12.5f % 12.5f % 12.5f",
+            i, stability_tag(i), g_writes[i],
+            g_regs[i][0], g_regs[i][1], g_regs[i][2], g_regs[i][3]);
     if (i % 4 == 0) {
         classify(i, note, sizeof(note));
         if (note[0]) fprintf(f, "   <-- c%u..c%u %s", i, i + 3, note);
     }
     fputc('\n', f);
+}
+
+void write_legend(FILE* f)
+{
+    fprintf(f, "Columns: register | within-frame stability | writes last frame | value\n\n");
+    fprintf(f, "  STABLE  = many writes, always the same value for the whole frame.\n");
+    fprintf(f, "            Camera candidates live here (view, projection, view-proj).\n");
+    fprintf(f, "  VARYING = different values within one frame -> per-object data\n");
+    fprintf(f, "            (world matrices, bone palettes). NOT the camera.\n\n");
+    fprintf(f, "The camera is STABLE within a frame but CHANGES between frames as you move.\n");
+    fprintf(f, "So: look for STABLE registers in the F11 diff. That is the intersection.\n\n");
 }
 
 bool key_pressed(int vk)
@@ -153,7 +182,21 @@ void record(unsigned start_register, const float* data, unsigned vec4_count)
             }
             break;
         }
-        std::memcpy(g_regs[reg], data + i * 4, sizeof(float) * 4);
+        const float* src = data + i * 4;
+
+        // Stability bookkeeping: first value seen this frame, and whether any
+        // later write in the same frame disagreed with it.
+        ++g_writes_accum[reg];
+        if (!g_seen_this_frame[reg]) {
+            g_seen_this_frame[reg] = true;
+            std::memcpy(g_frame_first[reg], src, sizeof(float) * 4);
+        } else if (!g_varied_this_frame[reg]) {
+            for (int c = 0; c < 4; ++c) {
+                if (std::fabs(g_frame_first[reg][c] - src[c]) > 1e-6f) { g_varied_this_frame[reg] = true; break; }
+            }
+        }
+
+        std::memcpy(g_regs[reg], src, sizeof(float) * 4);
         g_written[reg] = true;
         if (reg > g_highest_register) g_highest_register = reg;
     }
@@ -177,6 +220,7 @@ void dump_snapshot()
 
     fprintf(f, "bfbc2vr vertex shader constant snapshot\n");
     fprintf(f, "frame %u, highest register written c%u\n\n", g_frame, g_highest_register);
+    write_legend(f);
 
     for (unsigned i = 0; i <= g_highest_register && i < kMaxRegisters; ++i) {
         if (g_written[i]) write_register(f, i);
@@ -201,35 +245,56 @@ void dump_diff_vs_baseline()
     if (!f) { VRLOG("[constants] failed to open diff file"); return; }
 
     fprintf(f, "bfbc2vr constant diff vs baseline\n");
-    fprintf(f, "frame %u\n", g_frame);
-    fprintf(f, "Registers listed below changed since the baseline was marked.\n");
-    fprintf(f, "If the only thing you did was rotate the camera, these ARE the view transform.\n\n");
+    fprintf(f, "frame %u\n\n", g_frame);
+    write_legend(f);
 
-    unsigned changed = 0;
-    for (unsigned i = 0; i <= g_highest_register && i < kMaxRegisters; ++i) {
-        if (!g_written[i]) continue;
+    // Two passes. STABLE-and-changed is the answer we are hunting; everything
+    // else is per-object churn that changes whenever the camera moves and would
+    // otherwise bury the signal.
+    unsigned changed = 0, stable_changed = 0;
 
-        bool differs = false;
-        for (int c = 0; c < 4; ++c) {
-            if (std::fabs(g_regs[i][c] - g_baseline[i][c]) > 1e-5f) { differs = true; break; }
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool want_stable = (pass == 0);
+        fprintf(f, "%s\n", want_stable
+            ? "=== STABLE registers that changed - CAMERA CANDIDATES ==========="
+            : "=== VARYING registers that changed - per-object churn, ignore ===");
+
+        unsigned n = 0;
+        for (unsigned i = 0; i <= g_highest_register && i < kMaxRegisters; ++i) {
+            if (!g_written[i]) continue;
+            if (g_varied_last_frame[i] == want_stable) continue;
+
+            bool differs = false;
+            for (int c = 0; c < 4; ++c) {
+                if (std::fabs(g_regs[i][c] - g_baseline[i][c]) > 1e-5f) { differs = true; break; }
+            }
+            if (!differs) continue;
+
+            ++n; ++changed;
+            if (want_stable) ++stable_changed;
+
+            fprintf(f, "c%-3u  was  % 12.5f % 12.5f % 12.5f % 12.5f\n", i,
+                    g_baseline[i][0], g_baseline[i][1], g_baseline[i][2], g_baseline[i][3]);
+            fprintf(f, "      now  % 12.5f % 12.5f % 12.5f % 12.5f",
+                    g_regs[i][0], g_regs[i][1], g_regs[i][2], g_regs[i][3]);
+
+            char note[160];
+            if (i % 4 == 0) {
+                classify(i, note, sizeof(note));
+                if (note[0]) fprintf(f, "   <-- c%u..c%u %s", i, i + 3, note);
+            }
+            fprintf(f, "\n\n");
         }
-        if (!differs) continue;
-
-        ++changed;
-        fprintf(f, "c%-3u  was  % 12.5f % 12.5f % 12.5f % 12.5f\n", i,
-                g_baseline[i][0], g_baseline[i][1], g_baseline[i][2], g_baseline[i][3]);
-        fprintf(f, "      now  % 12.5f % 12.5f % 12.5f % 12.5f",
-                g_regs[i][0], g_regs[i][1], g_regs[i][2], g_regs[i][3]);
-
-        char note[160];
-        if (i % 4 == 0) {
-            classify(i, note, sizeof(note));
-            if (note[0]) fprintf(f, "   <-- c%u..c%u %s", i, i + 3, note);
-        }
-        fprintf(f, "\n\n");
+        if (!n) fprintf(f, "(none)\n\n");
     }
 
-    fprintf(f, "\n%u of %u written registers changed.\n", changed, g_highest_register + 1);
+    fprintf(f, "\n%u registers changed, %u of them STABLE.\n", changed, stable_changed);
+    if (stable_changed == 0) {
+        fprintf(f, "\nNo stable register changed. Either the camera did not actually move\n"
+                   "between F10 and F11, or this engine pre-multiplies the camera into\n"
+                   "per-object matrices - in which case the view transform must be\n"
+                   "recovered by factoring a VARYING register instead.\n");
+    }
     fclose(f);
 
     VRLOG("[constants] diff %02d written (%u changed) -> %s", g_snapshot_index, changed, path);
@@ -242,10 +307,22 @@ void on_present()
         std::lock_guard<std::mutex> lock(g_mutex);
         ++g_frame;
 
+        // Roll per-frame stability state. Dumps below read the just-completed
+        // frame, so this has to happen before the hotkeys are serviced.
+        unsigned stable = 0, varying = 0;
+        for (unsigned i = 0; i < kMaxRegisters; ++i) {
+            g_varied_last_frame[i] = g_varied_this_frame[i];
+            g_writes[i]            = g_writes_accum[i];
+            if (g_seen_this_frame[i]) { if (g_varied_this_frame[i]) ++varying; else ++stable; }
+            g_seen_this_frame[i]   = false;
+            g_varied_this_frame[i] = false;
+            g_writes_accum[i]      = 0;
+        }
+
         // Low-volume heartbeat so the log stays readable.
         if (g_frame % 600 == 0) {
-            VRLOG("[constants] frame %u: %u vec4 writes/frame, highest c%u",
-                  g_frame, g_writes_this_frame, g_highest_register);
+            VRLOG("[constants] frame %u: %u vec4 writes, highest c%u, %u stable / %u varying",
+                  g_frame, g_writes_this_frame, g_highest_register, stable, varying);
         }
         g_writes_this_frame = 0;
     }
