@@ -85,6 +85,7 @@ bool is_projection(const MatView& v)
 void classify(unsigned base, char* out, size_t out_size)
 {
     out[0] = '\0';
+    if (base + 3 >= kMaxRegisters) return;
     const float* m = &g_regs[base][0];
 
     for (int pass = 0; pass < 2; ++pass) {
@@ -133,10 +134,11 @@ void write_register(FILE* f, unsigned i)
     fprintf(f, "c%-3u %s x%-5u % 12.5f % 12.5f % 12.5f % 12.5f",
             i, stability_tag(i), g_writes[i],
             g_regs[i][0], g_regs[i][1], g_regs[i][2], g_regs[i][3]);
-    if (i % 4 == 0) {
-        classify(i, note, sizeof(note));
-        if (note[0]) fprintf(f, "   <-- c%u..c%u %s", i, i + 3, note);
-    }
+    // Every 4-register window, NOT only 4-aligned ones. BFBC2's camera matrices
+    // sit at c185 and c189 - both congruent to 1 mod 4 - so an alignment
+    // assumption hid the exact matrices this tool exists to find.
+    classify(i, note, sizeof(note));
+    if (note[0]) fprintf(f, "   <-- c%u..c%u %s", i, i + 3, note);
     fputc('\n', f);
 }
 
@@ -279,10 +281,8 @@ void dump_diff_vs_baseline()
                     g_regs[i][0], g_regs[i][1], g_regs[i][2], g_regs[i][3]);
 
             char note[160];
-            if (i % 4 == 0) {
-                classify(i, note, sizeof(note));
-                if (note[0]) fprintf(f, "   <-- c%u..c%u %s", i, i + 3, note);
-            }
+            classify(i, note, sizeof(note));
+            if (note[0]) fprintf(f, "   <-- c%u..c%u %s", i, i + 3, note);
             fprintf(f, "\n\n");
         }
         if (!n) fprintf(f, "(none)\n\n");
