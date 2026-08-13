@@ -182,8 +182,12 @@ bool submit_frame()
     // 1. Mirror the backbuffer into the eye texture the game just rendered
     //    for. In stereo the eye alternates per frame; in mono it stays 0 and
     //    both panels get the same picture via the submit below.
-    const int fresh = camover::stereo_active() ? camover::last_rendered_eye() : 0;
-    const bool mono = !camover::stereo_active();
+    // Mono whenever no 3D scene was drawn last frame (menus, loading screens):
+    // stereo on flat 2D is meaningless, and AER staleness there puts seconds
+    // of pan-drift between the eyes.
+    const bool scene_3d = camover::modified_last_frame() > 0;
+    const bool mono = !camover::stereo_active() || !scene_3d;
+    const int fresh = mono ? 0 : camover::last_rendered_eye();
 
     stage("StretchRect");
     IDirect3DSurface9* dst = nullptr;

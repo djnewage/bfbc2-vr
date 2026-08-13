@@ -72,4 +72,11 @@ void on_present();
 int  last_rendered_eye();
 bool stereo_active();
 
+// Corrected transform writes during the last completed frame. Zero means no
+// 3D world was drawn - a menu or loading screen - where stereo is meaningless
+// and alternate-eye staleness is glaring (panning 2D art + load hitches put
+// SECONDS of difference between the eyes). The compositor drops to mono
+// submission whenever this is zero.
+unsigned modified_last_frame();
+
 } // namespace camover

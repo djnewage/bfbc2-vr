@@ -466,5 +466,6 @@ void on_present()
 
 int  last_rendered_eye() { return (g_eye_swap > 0) ? g_last_eye : (g_last_eye ^ 1); }
 bool stereo_active()     { return g_hmd_active && g_correct_on; }
+unsigned modified_last_frame() { return g_modified_last_frame; }
 
 } // namespace camover
