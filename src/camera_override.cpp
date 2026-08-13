@@ -372,10 +372,20 @@ void on_present()
     const float dt = last_tick ? (now - last_tick) / 1000.0f : 0.0f;
     last_tick = now;
 
-    // Alternate-eye cadence: the frame that just presented used g_frame_eye;
-    // record it for the compositor, then flip for the frame about to render.
-    g_last_eye  = g_frame_eye;
-    g_frame_eye ^= 1;
+    // Alternate-eye cadence, driven by CONTENT rather than Present count. The
+    // game sometimes Presents without rendering (menu overlays, pump frames);
+    // toggling the eye on those churns the phase - the fresh copy keeps
+    // landing in one eye while the other eye's texture goes stale and gets
+    // resubmitted as a seconds-old view (the head-still double vision the
+    // stereo screenshots showed). Only a frame that actually contained
+    // corrected 3D draws advances the eye.
+    // g_modified_this_frame still holds the just-finished frame's count here -
+    // the roll that zeroes it happens further down in this function.
+    const bool had_3d = (g_modified_this_frame > 0);
+    if (had_3d) {
+        g_last_eye  = g_frame_eye;
+        g_frame_eye ^= 1;
+    }
 
     // Head tracking: refresh the pose and, while enabled, convert it to a
     // yaw/pitch delta against the reference captured when tracking engaged.
@@ -411,6 +421,15 @@ void on_present()
         VRLOG("[correct] %s: modified %u transform writes last frame (fingerprints: %u found, %u none)",
               g_transposed ? "transposed" : "row-registers", g_modified_last_frame,
               g_fp_found, g_fp_rejected);
+    }
+
+    // Stereo phase forensics: eye parity vs corrected-write count per frame.
+    // If eye parity and frame content ever fall out of phase - empty frames,
+    // double Presents - each panel receives the OTHER eye's viewpoint half the
+    // time, which doubles the world permanently and no calibration can fix it.
+    // A short burst every ~5s makes that visible in the log.
+    if (g_correct_on && g_hmd_active && frames % 300 < 8) {
+        VRLOG("[phase] frame %u eye=%d modified=%u ipd=%.4f", frames, g_last_eye, g_modified_last_frame, g_ipd_world);
     }
     if (frames % 300 == 0) {
         for (size_t i = 0; i < g_shape_count; ++i) g_shapes[i].calls = 0;

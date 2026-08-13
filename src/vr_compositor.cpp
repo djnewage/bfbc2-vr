@@ -150,6 +150,23 @@ bool submit_frame()
     if (!g_device || !g_enabled) return false;
     if (!init_compositor() || !init_interop_device()) return false;
 
+    // Empty-Present policy. An isolated Present with no corrected 3D draws is
+    // a pump frame - submitting it would churn eye textures with stale
+    // content, so skip entirely (no WaitGetPoses; the next real frame
+    // re-paces). SUSTAINED emptiness is a menu or loading screen - keep the
+    // compositor fed with mono so the panels never freeze.
+    static unsigned s_empty_streak = 0;
+    if (camover::stereo_active()) {
+        if (camover::modified_last_frame() == 0) {
+            ++s_empty_streak;
+            if (s_empty_streak < 5) return false;   // isolated pump frame(s)
+        } else {
+            s_empty_streak = 0;
+        }
+    } else {
+        s_empty_streak = 0;
+    }
+
     // The compositor requires WaitGetPoses before the first Submit ever lands.
     // After that it moves to the END of the frame (post-Submit), which is the
     // conventional order: submit what we have, then block for next frame's
@@ -182,11 +199,10 @@ bool submit_frame()
     // 1. Mirror the backbuffer into the eye texture the game just rendered
     //    for. In stereo the eye alternates per frame; in mono it stays 0 and
     //    both panels get the same picture via the submit below.
-    // Mono whenever no 3D scene was drawn last frame (menus, loading screens):
-    // stereo on flat 2D is meaningless, and AER staleness there puts seconds
-    // of pan-drift between the eyes.
-    const bool scene_3d = camover::modified_last_frame() > 0;
-    const bool mono = !camover::stereo_active() || !scene_3d;
+    // Mono when tracking is off, or when emptiness is sustained (menu/loading
+    // screen - the empty-streak gate above let this frame through). Stereo
+    // only for real 3D content frames.
+    const bool mono = !camover::stereo_active() || camover::modified_last_frame() == 0;
     const int fresh = mono ? 0 : camover::last_rendered_eye();
 
     stage("StretchRect");
