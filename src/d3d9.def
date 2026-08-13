@@ -2,6 +2,7 @@
 ; MSVC would emit x86 stdcall-decorated names (_Direct3DCreate9@4) and the game
 ; would fail to resolve them.
 EXPORTS
+    BFBC2VR_ProxyVersion
     Direct3DCreate9
     Direct3DCreate9Ex
     D3DPERF_BeginEvent

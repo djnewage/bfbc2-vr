@@ -89,6 +89,16 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 
 extern "C" {
 
+// Self-identification. Tooling needs to answer "is the d3d9.dll sitting in the
+// game directory ours, DXVK's, or something else?" before overwriting it.
+// A sidecar marker file was the first attempt and it desynced immediately -
+// installs predating the marker looked like a stranger's DLL. A magic string
+// compiled into the binary cannot drift from the binary.
+const char* WINAPI BFBC2VR_ProxyVersion()
+{
+    return "BFBC2VR_PROXY_MAGIC_v1 bfbc2vr-proxy/0.1";
+}
+
 IDirect3D9* WINAPI Direct3DCreate9(UINT sdk_version)
 {
     if (!load_real_d3d9()) return nullptr;
