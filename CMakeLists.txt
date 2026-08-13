@@ -16,6 +16,7 @@ add_library(d3d9 SHARED
     src/dllmain.cpp
     src/logger.cpp
     src/constants.cpp
+    src/camera_override.cpp
     src/wrapper_d3d9.cpp
     src/wrapper_device.cpp
     src/d3d9.def

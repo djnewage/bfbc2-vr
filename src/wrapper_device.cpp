@@ -10,7 +10,10 @@
 
 #include "wrappers.h"
 #include "constants.h"
+#include "camera_override.h"
 #include "logger.h"
+
+#include <vector>
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::QueryInterface(REFIID riid, void** ppvObj)
 {
@@ -63,9 +66,19 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetVertexShaderConstantF(UINT start
     static bool first = true;
     if (first) { first = false; VRLOG("[hook] first SetVertexShaderConstantF (c%u, %u vec4) - constant path is live", start, count); }
 
-    // Mirror into the shadow constant file before forwarding. Observation only -
-    // the game still gets exactly the values it asked for.
+    // Mirror the game's real values first, so dumps keep showing what the game
+    // asked for rather than what we substituted.
     vrconst::record(start, data, count);
+
+    // Phase 3a: if this write covers an overridden camera block, forward a
+    // modified copy instead. thread_local because D3D9 calls can arrive from
+    // more than one thread and this is on the hottest path in the process -
+    // roughly 5900 calls per frame.
+    static thread_local std::vector<float> scratch;
+    if (camover::transform(start, data, count, scratch)) {
+        return m_real->SetVertexShaderConstantF(start, scratch.data(), count);
+    }
+
     return m_real->SetVertexShaderConstantF(start, data, count);
 }
 
@@ -105,6 +118,7 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Present(const RECT* src, const RECT
 
     // Frame boundary: poll the discovery hotkeys and emit periodic stats.
     vrconst::on_present();
+    camover::on_present();
     return m_real->Present(src, dst, wnd, dirty);
 }
 
@@ -181,6 +195,7 @@ HRESULT STDMETHODCALLTYPE D3D9SwapChainWrapper::Present(const RECT* src, const R
     if (first) { first = false; VRLOG("[present] first frame via IDirect3DSwapChain9::Present - swapchain path is live"); }
 
     vrconst::on_present();
+    camover::on_present();
     return m_real->Present(src, dst, wnd, dirty, flags);
 }
 
