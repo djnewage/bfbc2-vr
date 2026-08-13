@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <cmath>
 #include <cstring>
+#include <map>
+#include <mutex>
 
 namespace camover {
 namespace {
@@ -39,7 +41,16 @@ void note_shape(unsigned start, unsigned count)
 using Mat4 = float[16];
 
 float g_vp[16]         = {};   // last seen view-projection, from c185-c188
+float g_vp_inv[16]     = {};   // its inverse, refreshed with the correction
 bool  g_have_vp        = false;
+bool  g_have_vp_inv    = false;
+
+// Fingerprint cache for "constants"-blob shaders: (shader, write start) ->
+// matrix offset within the write in vec4s, or -1 for "scanned, none found".
+// Guarded by g_fp_mutex; only touched when the active shader is uncharted.
+std::mutex g_fp_mutex;
+std::map<std::pair<void*, unsigned>, int> g_fingerprints;
+unsigned g_fp_found = 0, g_fp_rejected = 0;
 float g_eye[3]         = {};   // camera position, from c192
 bool  g_have_eye       = false;
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
@@ -133,6 +144,59 @@ bool covers(unsigned start, unsigned count, unsigned base)
     return start <= base && (start + count) >= (base + 4);
 }
 
+// Does the 4-register window at `window` (transposed storage) hold a WVP?
+// If S^T really is World * VP, then S^T * VP^-1 recovers World, which must be
+// affine: last column (0,0,0,1). Bone rows, packed params, and lighting data
+// do not survive that test.
+bool window_is_wvp(const float* window)
+{
+    if (!g_have_vp_inv) return false;
+
+    Mat4 m, world;
+    transpose(reinterpret_cast<const float(&)[16]>(*window), m);
+    multiply(m, g_vp_inv, world);
+
+    const float w33 = at(world, 3, 3);
+    if (std::fabs(w33 - 1.0f) > 0.02f) return false;
+    for (int r = 0; r < 3; ++r) {
+        if (std::fabs(at(world, r, 3)) > 0.02f) return false;
+    }
+    // Degenerate guard: an all-zero window would pass the column test trivially
+    // if VP^-1 had zeros in the right places; require a non-trivial diagonal.
+    if (std::fabs(at(world, 0, 0)) + std::fabs(at(world, 1, 1)) + std::fabs(at(world, 2, 2)) < 0.1f) return false;
+    return true;
+}
+
+// For a write from an uncharted ("constants"-blob) shader: find the WVP window
+// within it, scanning once per (shader, write start) and caching the result.
+int fingerprint_offset(void* shader, unsigned start, const float* data, unsigned vec4_count)
+{
+    const auto key = std::make_pair(shader, start);
+    {
+        std::lock_guard<std::mutex> lock(g_fp_mutex);
+        auto it = g_fingerprints.find(key);
+        if (it != g_fingerprints.end()) return it->second;
+    }
+
+    int found = -1;
+    if (vec4_count >= 4) {
+        for (unsigned off = 0; off + 4 <= vec4_count; ++off) {
+            if (window_is_wvp(data + off * 4)) { found = static_cast<int>(off); break; }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_fp_mutex);
+    g_fingerprints[key] = found;
+    if (found >= 0) {
+        ++g_fp_found;
+        VRLOG("[fingerprint] shader %p write c%u+%u: WVP at offset %d (c%u)",
+              shader, start, vec4_count, found, start + found);
+    } else {
+        ++g_fp_rejected;
+    }
+    return found;
+}
+
 // CORRECTION = VP^-1 * RotAboutEye * VP.
 // Valid for any matrix ending in clip space, so the same value corrects a
 // per-object WVP and the global VP alike.
@@ -145,8 +209,11 @@ void rebuild_correction()
     if (!invert(g_vp, vp_inv)) {
         static bool warned = false;
         if (!warned) { warned = true; VRLOG("[override] VP is singular - cannot build correction"); }
+        g_have_vp_inv = false;
         return;
     }
+    std::memcpy(g_vp_inv, vp_inv, sizeof(g_vp_inv));
+    g_have_vp_inv = true;
 
     Mat4 to_origin, rot, back, r, tmp;
     translation(-g_eye[0], -g_eye[1], -g_eye[2], to_origin);
@@ -183,11 +250,18 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
 
     if (!g_correct_on || !g_have_correction) return false;
 
-    // Only the spans the ACTIVE shader's own constant table declares as
-    // clip-space transforms. No declaration, no touch.
+    // Spans the ACTIVE shader's own constant table declares as clip-space
+    // transforms; for "constants"-blob shaders that declare nothing useful,
+    // fall back to a cached value fingerprint (see window_is_wvp).
     shaderreg::Span spans[shaderreg::kMaxSpans];
-    const size_t n = shaderreg::active_transform_spans(spans);
-    if (n == 0) return false;
+    size_t n = shaderreg::active_transform_spans(spans);
+    if (n == 0) {
+        if (!shaderreg::active_shader_uncharted()) return false;
+        const int off = fingerprint_offset(shaderreg::active_shader(), start_register, data, vec4_count);
+        if (off < 0) return false;
+        spans[0] = { start_register + static_cast<unsigned>(off), 4 };
+        n = 1;
+    }
 
     bool any = false;
     for (size_t s = 0; s < n; ++s) {
@@ -233,8 +307,9 @@ void on_present()
     static unsigned frames = 0;
     ++frames;
     if (g_correct_on && frames % 300 == 0) {
-        VRLOG("[correct] %s: modified %u transform writes last frame",
-              g_transposed ? "transposed" : "row-registers", g_modified_last_frame);
+        VRLOG("[correct] %s: modified %u transform writes last frame (fingerprints: %u found, %u none)",
+              g_transposed ? "transposed" : "row-registers", g_modified_last_frame,
+              g_fp_found, g_fp_rejected);
     }
     if (frames % 300 == 0) {
         for (size_t i = 0; i < g_shape_count; ++i) g_shapes[i].calls = 0;

@@ -45,4 +45,12 @@ struct Span { unsigned start; unsigned count; };
 constexpr size_t kMaxSpans = 4;
 size_t active_transform_spans(Span out[kMaxSpans]);
 
+// The active shader, for keying per-shader caches (e.g. fingerprinted matrix
+// offsets in shaders that declare only an anonymous "constants" blob).
+IDirect3DVertexShader9* active_shader();
+
+// True if the active shader declares float constants but none of the named
+// transform spans - the "constants"-blob shaders that need fingerprinting.
+bool active_shader_uncharted();
+
 } // namespace shaderreg

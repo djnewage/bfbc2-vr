@@ -150,6 +150,17 @@ void on_set_vertex_shader(IDirect3DVertexShader9* shader)
     t_active = shader;
 }
 
+IDirect3DVertexShader9* active_shader() { return t_active; }
+
+bool active_shader_uncharted()
+{
+    if (!t_active) return false;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_shaders.find(t_active);
+    if (it == g_shaders.end()) return false;
+    return it->second.transform_span_count == 0 && !it->second.constants.empty();
+}
+
 size_t active_transform_spans(Span out[kMaxSpans])
 {
     if (!t_active) return 0;
