@@ -1,0 +1,29 @@
+# Build output
+build/
+out/
+bin/
+obj/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.user
+
+# Captures & scratch
+captures/
+*.rdc
+*.log
+scratch/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+CMakeFiles/
+CMakeCache.txt
+
+# Never commit game assets
+*.fbrb
+*.dbx
