@@ -4,6 +4,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>
+#include <share.h>
 
 namespace vrlog {
 namespace {
@@ -41,7 +42,12 @@ void init()
 
     g_dir = resolve_module_dir();
     const std::string path = g_dir + "bfbc2vr.log";
-    fopen_s(&g_file, path.c_str(), "w");
+
+    // _fsopen with _SH_DENYWR, NOT fopen_s. fopen_s opens with exclusive access,
+    // which locks the log so hard that nothing can read it while the game runs -
+    // exactly when we most want to watch it. This lets readers in and keeps
+    // other writers out.
+    g_file = _fsopen(path.c_str(), "w", _SH_DENYWR);
 
     if (g_file) {
         SYSTEMTIME t;
