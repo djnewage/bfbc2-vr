@@ -25,7 +25,19 @@ uint32_t         g_vk_queue_family = 0;
 UINT g_width = 0, g_height = 0;
 bool g_scene_ok   = false;   // compositor interface acquired
 bool g_interop_ok = false;
+bool g_enabled    = true;    // F4 kill switch - keeps the game playable if VR path hangs
+bool g_wgp_called = false;   // WaitGetPoses must precede the first Submit
 unsigned g_submits = 0, g_submit_errors = 0;
+
+// Hang forensics. The level-load freeze gives us no stack, but the log's last
+// line does: stage-mark every step of the submit path. With the logger's
+// per-line flush, whatever stage the log ends on is where the thread stopped.
+// Verbose for the first frames after init/reset, then every 600th frame.
+unsigned g_verbose_frames = 10;
+void stage(const char* s)
+{
+    if (g_verbose_frames > 0 || g_submits % 600 == 0) VRLOG("[stage] %s", s);
+}
 
 bool init_interop_device()
 {
@@ -115,18 +127,51 @@ void on_reset_begin()
 
 bool submit_frame()
 {
-    if (!g_device) return false;
-    if (!init_compositor() || !init_interop_device() || !init_eye_texture()) return false;
+    // F4: VR submission kill switch, usable even mid-hang-recovery. Polled
+    // before the enable check so it can turn the path back ON too.
+    {
+        static bool down = false;
+        const bool now = (GetAsyncKeyState(VK_F4) & 0x8000) != 0;
+        if (now && !down) {
+            g_enabled = !g_enabled;
+            VRLOG("[comp] VR submission %s (F4)", g_enabled ? "ENABLED" : "DISABLED");
+        }
+        down = now;
+    }
 
-    // WaitGetPoses is the compositor heartbeat: it paces us to the HMD refresh
-    // and marks the app as actively rendering. Without it, Submit is rejected.
-    vr::TrackedDevicePose_t render_poses[vr::k_unMaxTrackedDeviceCount];
-    vr::VRCompositor()->WaitGetPoses(render_poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+    if (!g_device || !g_enabled) return false;
+    if (!init_compositor() || !init_interop_device()) return false;
+
+    // The compositor requires WaitGetPoses before the first Submit ever lands.
+    // After that it moves to the END of the frame (post-Submit), which is the
+    // conventional order: submit what we have, then block for next frame's
+    // poses - instead of blocking up front while holding the game's Present.
+    if (!g_wgp_called) {
+        stage("first WaitGetPoses");
+        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+        vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+        g_wgp_called = true;
+    }
+
+    // Backbuffer can change size across level loads (Reset or swapchain
+    // rebuild). Resize-check every frame rather than trusting init-time state.
+    stage("backbuffer query");
+    IDirect3DSurface9* bb = nullptr;
+    if (FAILED(g_device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+    D3DSURFACE_DESC bbd = {};
+    bb->GetDesc(&bbd);
+    if (bbd.Width != g_width || bbd.Height != g_height) {
+        VRLOG("[comp] backbuffer resized %ux%u -> %ux%u, recreating eye texture",
+              g_width, g_height, bbd.Width, bbd.Height);
+        g_width = bbd.Width; g_height = bbd.Height;
+        on_reset_begin();
+        g_verbose_frames = 10;
+    }
+    if (!init_eye_texture()) { bb->Release(); return false; }
 
     // 1. Mirror the backbuffer into our eye texture.
-    IDirect3DSurface9* bb = nullptr;
+    stage("StretchRect");
     IDirect3DSurface9* dst = nullptr;
-    if (FAILED(g_device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
     if (FAILED(g_eye_tex->GetSurfaceLevel(0, &dst)) || !dst) { bb->Release(); return false; }
     const HRESULT copy_hr = g_device->StretchRect(bb, nullptr, dst, nullptr, D3DTEXF_NONE);
     bb->Release(); dst->Release();
@@ -137,6 +182,7 @@ bool submit_frame()
     }
 
     // 2. Vulkan handle + current layout of the eye image.
+    stage("GetVulkanImageInfo");
     VkImage image = VK_NULL_HANDLE;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageCreateInfo info = {};
@@ -155,8 +201,10 @@ bool submit_frame()
     range.levelCount = 1;
     range.layerCount = 1;
 
+    stage("transition to TRANSFER_SRC");
     g_interop_dev->TransitionTextureLayout(g_eye_interop, &range, layout,
                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    stage("FlushRenderingCommands");
     g_interop_dev->FlushRenderingCommands();
 
     vr::VRVulkanTextureData_t vkdata = {};
@@ -177,15 +225,27 @@ bool submit_frame()
     tex.eType       = vr::TextureType_Vulkan;
     tex.eColorSpace = vr::ColorSpace_Auto;
 
+    stage("LockSubmissionQueue");
     g_interop_dev->LockSubmissionQueue();
+    stage("Submit L");
     const auto err_l = vr::VRCompositor()->Submit(vr::Eye_Left,  &tex);
+    stage("Submit R");
     const auto err_r = vr::VRCompositor()->Submit(vr::Eye_Right, &tex);
+    stage("ReleaseSubmissionQueue");
     g_interop_dev->ReleaseSubmissionQueue();
 
+    stage("transition back");
     g_interop_dev->TransitionTextureLayout(g_eye_interop, &range,
                                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout);
 
+    // End-of-frame heartbeat: pace to HMD refresh and fetch next frame's poses.
+    stage("WaitGetPoses");
+    vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+    vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+    stage("frame done");
+
     ++g_submits;
+    if (g_verbose_frames > 0) --g_verbose_frames;
     if (err_l != vr::VRCompositorError_None || err_r != vr::VRCompositorError_None) {
         ++g_submit_errors;
         if (g_submit_errors <= 5) {
