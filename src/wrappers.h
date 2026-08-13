@@ -13,6 +13,38 @@
 #include <d3d9.h>
 
 // ---------------------------------------------------------------------------
+// A game can present two ways: IDirect3DDevice9::Present, or by fetching a
+// swap chain and calling IDirect3DSwapChain9::Present on it. Wrapping only the
+// device leaves the second path unhooked - the game escapes through a pointer
+// we handed it - and the frame boundary is where all our VR work eventually
+// happens. So both paths get wrapped.
+class D3D9SwapChainWrapper final : public IDirect3DSwapChain9 {
+public:
+    D3D9SwapChainWrapper(IDirect3DSwapChain9* real, IDirect3DDevice9* device)
+        : m_real(real), m_device(device) {}
+
+    IDirect3DSwapChain9* real() const { return m_real; }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObj) override;
+    ULONG   STDMETHODCALLTYPE AddRef() override;
+    ULONG   STDMETHODCALLTYPE Release() override;
+
+    HRESULT STDMETHODCALLTYPE Present(const RECT* src, const RECT* dst, HWND wnd,
+                                      const RGNDATA* dirty, DWORD flags) override;
+    HRESULT STDMETHODCALLTYPE GetDevice(IDirect3DDevice9** dev) override;
+
+    HRESULT STDMETHODCALLTYPE GetFrontBufferData(IDirect3DSurface9* s) override { return m_real->GetFrontBufferData(s); }
+    HRESULT STDMETHODCALLTYPE GetBackBuffer(UINT i, D3DBACKBUFFER_TYPE t, IDirect3DSurface9** s) override { return m_real->GetBackBuffer(i, t, s); }
+    HRESULT STDMETHODCALLTYPE GetRasterStatus(D3DRASTER_STATUS* s) override { return m_real->GetRasterStatus(s); }
+    HRESULT STDMETHODCALLTYPE GetDisplayMode(D3DDISPLAYMODE* m) override { return m_real->GetDisplayMode(m); }
+    HRESULT STDMETHODCALLTYPE GetPresentParameters(D3DPRESENT_PARAMETERS* pp) override { return m_real->GetPresentParameters(pp); }
+
+private:
+    IDirect3DSwapChain9* m_real   = nullptr;
+    IDirect3DDevice9*    m_device = nullptr;   // our device wrapper
+};
+
+// ---------------------------------------------------------------------------
 
 class D3D9DeviceWrapper final : public IDirect3DDevice9 {
 public:
@@ -45,8 +77,9 @@ public:
     HRESULT STDMETHODCALLTYPE SetCursorProperties(UINT x, UINT y, IDirect3DSurface9* s) override { return m_real->SetCursorProperties(x, y, s); }
     void    STDMETHODCALLTYPE SetCursorPosition(int x, int y, DWORD f) override { m_real->SetCursorPosition(x, y, f); }
     BOOL    STDMETHODCALLTYPE ShowCursor(BOOL b) override { return m_real->ShowCursor(b); }
-    HRESULT STDMETHODCALLTYPE CreateAdditionalSwapChain(D3DPRESENT_PARAMETERS* pp, IDirect3DSwapChain9** sc) override { return m_real->CreateAdditionalSwapChain(pp, sc); }
-    HRESULT STDMETHODCALLTYPE GetSwapChain(UINT i, IDirect3DSwapChain9** sc) override { return m_real->GetSwapChain(i, sc); }
+    // Both return wrapped swap chains - see wrapper_device.cpp.
+    HRESULT STDMETHODCALLTYPE CreateAdditionalSwapChain(D3DPRESENT_PARAMETERS* pp, IDirect3DSwapChain9** sc) override;
+    HRESULT STDMETHODCALLTYPE GetSwapChain(UINT i, IDirect3DSwapChain9** sc) override;
     UINT    STDMETHODCALLTYPE GetNumberOfSwapChains() override { return m_real->GetNumberOfSwapChains(); }
     HRESULT STDMETHODCALLTYPE GetBackBuffer(UINT i, UINT b, D3DBACKBUFFER_TYPE t, IDirect3DSurface9** s) override { return m_real->GetBackBuffer(i, b, t, s); }
     HRESULT STDMETHODCALLTYPE GetRasterStatus(UINT i, D3DRASTER_STATUS* s) override { return m_real->GetRasterStatus(i, s); }
