@@ -138,12 +138,21 @@ bool  g_fov_auto    = true;
 // camera's forward axis - moved out, not scaled, so it subtends a smaller
 // angle the way a real arm's-length object would.
 // Minus/Equals keys tune it live.
-float g_vm_push   = 0.45f;   // world units (meters) forward
-float g_vm_radius = 2.00f;   // treat draws inside this as viewmodel
+// OFF by default. At 2.0m radius the detector matched ~700 draws per frame -
+// a quarter of the scene, not a weapon - and shoving all of it forward is why
+// the view broke. Proximity alone is too blunt; the histogram below measures
+// how the scene actually distributes so the radius can be chosen, not guessed.
+float g_vm_push   = 0.0f;    // world units (meters) forward; 0 = disabled
+float g_vm_radius = 0.25f;   // tight: only geometry essentially AT the eye
 float g_correction_near[16] = {};
 bool  g_have_correction_near = false;
-unsigned g_vm_hits = 0, g_vm_hits_last = 0;   // did detection actually fire?
+unsigned g_vm_hits = 0, g_vm_hits_last = 0;
 float    g_vm_nearest = 1e9f, g_vm_nearest_last = 0.0f;
+
+// Distance histogram of corrected draws, so the viewmodel's real distance band
+// is measurable rather than assumed.
+constexpr float kBuckets[5] = { 0.1f, 0.5f, 1.0f, 2.0f, 5.0f };
+unsigned g_vm_hist[6] = {}, g_vm_hist_last[6] = {};
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
 
@@ -267,12 +276,21 @@ void update_auto_fov()
     }
     if (need_h < 1e-6f || need_v < 1e-6f) return;
 
-    const float wx = (std::min)((std::max)(need_h / th, 1.0f), 3.0f);
-    const float wy = (std::min)((std::max)(need_v / tv, 1.0f), 4.0f);
+    // Recomputed EXACTLY every frame, with no change threshold. The game
+    // animates its own FOV (sprint, ADS, movement bob) - the log showed
+    // tangents drifting 0.683 -> 0.701 within seconds. A stale widen factor
+    // turns that drift into a breathing field of view, which is both wrong in
+    // VR and mismatched against the compositor bounds. Tracking it exactly
+    // pins the rendered field to the headset's frustum as a constant, so the
+    // game's zoom no longer reaches the eyes.
+    const float wx = (std::min)((std::max)(need_h / th, 1.0f), 6.0f);
+    const float wy = (std::min)((std::max)(need_v / tv, 1.0f), 6.0f);
 
-    if (std::fabs(wx - g_fov_widen_x) > 0.01f || std::fabs(wy - g_fov_widen_y) > 0.01f) {
-        g_fov_widen_x = wx;
-        g_fov_widen_y = wy;
+    const bool worth_logging = std::fabs(wx - g_fov_widen_x) > 0.15f ||
+                               std::fabs(wy - g_fov_widen_y) > 0.15f;
+    g_fov_widen_x = wx;
+    g_fov_widen_y = wy;
+    if (worth_logging) {
         VRLOG("[fov] auto: game tangents h=%.4f v=%.4f, headset needs h=%.4f v=%.4f -> widen %.2fx / %.2fx",
               th, tv, need_h, need_v, wx, wy);
     }
@@ -301,6 +319,10 @@ bool is_near_camera(const float* stored_block)
     const float d2 = dx*dx + dy*dy + dz*dz;
     const float d  = std::sqrt(d2);
     if (d < g_vm_nearest) g_vm_nearest = d;
+
+    int b = 5;
+    for (int i = 0; i < 5; ++i) { if (d < kBuckets[i]) { b = i; break; } }
+    ++g_vm_hist[b];
 
     if (d2 < (g_vm_radius * g_vm_radius)) { ++g_vm_hits; return true; }
     return false;
@@ -648,15 +670,20 @@ void on_present()
     ++frames;
     g_vm_hits_last    = g_vm_hits;
     g_vm_nearest_last = (g_vm_nearest < 1e8f) ? g_vm_nearest : -1.0f;
+    std::memcpy(g_vm_hist_last, g_vm_hist, sizeof(g_vm_hist));
     g_vm_hits = 0;
     g_vm_nearest = 1e9f;
+    std::memset(g_vm_hist, 0, sizeof(g_vm_hist));
 
     if (g_correct_on && frames % 300 == 0) {
         VRLOG("[correct] %s: modified %u transform writes last frame (fingerprints: %u found, %u none)",
               g_transposed ? "transposed" : "row-registers", g_modified_last_frame,
               g_fp_found, g_fp_rejected);
-        VRLOG("[viewmodel] push=%.2fm radius=%.2fm: %u draws matched, nearest draw %.3fm",
+        VRLOG("[viewmodel] push=%.2fm radius=%.2fm: %u matched, nearest %.3fm",
               g_vm_push, g_vm_radius, g_vm_hits_last, g_vm_nearest_last);
+        VRLOG("[vm-hist] <0.1m:%u  <0.5m:%u  <1m:%u  <2m:%u  <5m:%u  >5m:%u",
+              g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2],
+              g_vm_hist_last[3], g_vm_hist_last[4], g_vm_hist_last[5]);
     }
 
     // Stereo phase forensics: eye parity vs corrected-write count per frame.
