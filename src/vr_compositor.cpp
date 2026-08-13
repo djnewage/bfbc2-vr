@@ -29,6 +29,7 @@ UINT g_width = 0, g_height = 0;
 bool g_scene_ok   = false;   // compositor interface acquired
 bool g_interop_ok = false;
 bool g_enabled    = true;    // F4 kill switch - keeps the game playable if VR path hangs
+bool g_stamp_debug = true;   // paint eye/frame identity markers into eye textures
 bool g_wgp_called = false;   // WaitGetPoses must precede the first Submit
 unsigned g_submits = 0, g_submit_errors = 0;
 
@@ -209,12 +210,30 @@ bool submit_frame()
     IDirect3DSurface9* dst = nullptr;
     if (FAILED(g_eye_tex[fresh]->GetSurfaceLevel(0, &dst)) || !dst) { bb->Release(); return false; }
     const HRESULT copy_hr = g_device->StretchRect(bb, nullptr, dst, nullptr, D3DTEXF_NONE);
-    bb->Release(); dst->Release();
+    bb->Release();
     if (FAILED(copy_hr)) {
+        dst->Release();
         static bool logged = false;
         if (!logged) { logged = true; VRLOG("[comp] StretchRect backbuffer->eye failed 0x%08lX", copy_hr); }
         return false;
     }
+
+    // Identity stamps, painted into the texture itself so a stereo screenshot
+    // carries its own forensics: which eye texture is on which panel, and how
+    // many frames apart the two panels are.
+    //   top-left 48x48:  GREEN = eye texture 0, RED = eye texture 1
+    //   top strip x=64+: 8 blocks, (g_submits & 0xFF) in binary, white=1
+    if (g_stamp_debug) {
+        RECT eye_rect = { 0, 0, 48, 48 };
+        g_device->ColorFill(dst, &eye_rect,
+                            fresh == 0 ? D3DCOLOR_XRGB(0, 220, 0) : D3DCOLOR_XRGB(220, 0, 0));
+        for (int bit = 0; bit < 8; ++bit) {
+            RECT r = { 64 + bit * 24, 0, 64 + bit * 24 + 24, 24 };
+            const bool set = (g_submits >> bit) & 1;
+            g_device->ColorFill(dst, &r, set ? D3DCOLOR_XRGB(255, 255, 255) : D3DCOLOR_XRGB(0, 0, 0));
+        }
+    }
+    dst->Release();
 
     // 2. Vulkan handles + layouts for both eye images.
     stage("GetVulkanImageInfo");

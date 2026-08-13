@@ -475,10 +475,14 @@ void on_present()
     }
     if (key_pressed(VK_F2)) {
         g_ipd_world *= 0.8f;
-        VRLOG("[stereo] IPD -> %.4f world units", g_ipd_world);
+        // The multiplicative step approaches zero but never reaches it; floor
+        // to a true zero so "identical corrections in both eyes" is testable.
+        if (g_ipd_world < 0.0005f) g_ipd_world = 0.0f;
+        if (g_ipd_world == 0.0f) VRLOG("[stereo] IPD -> 0 (disabled)");
+        else                     VRLOG("[stereo] IPD -> %.4f world units", g_ipd_world);
     }
     if (key_pressed(VK_F3)) {
-        g_ipd_world *= 1.25f;
+        g_ipd_world = (g_ipd_world == 0.0f) ? 0.008f : g_ipd_world * 1.25f;
         VRLOG("[stereo] IPD -> %.4f world units", g_ipd_world);
     }
 }
