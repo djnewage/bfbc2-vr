@@ -11,6 +11,7 @@
 #include "wrappers.h"
 #include "constants.h"
 #include "camera_override.h"
+#include "shader_registry.h"
 #include "logger.h"
 
 #include <vector>
@@ -119,6 +120,7 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Present(const RECT* src, const RECT
     // Frame boundary: poll the discovery hotkeys and emit periodic stats.
     vrconst::on_present();
     camover::on_present();
+    shaderreg::on_present();
     return m_real->Present(src, dst, wnd, dirty);
 }
 
@@ -196,7 +198,21 @@ HRESULT STDMETHODCALLTYPE D3D9SwapChainWrapper::Present(const RECT* src, const R
 
     vrconst::on_present();
     camover::on_present();
+    shaderreg::on_present();
     return m_real->Present(src, dst, wnd, dirty, flags);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::CreateVertexShader(const DWORD* fn, IDirect3DVertexShader9** s)
+{
+    const HRESULT hr = m_real->CreateVertexShader(fn, s);
+    if (SUCCEEDED(hr) && s && *s) shaderreg::on_create_vertex_shader(fn, *s);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetVertexShader(IDirect3DVertexShader9* s)
+{
+    shaderreg::on_set_vertex_shader(s);
+    return m_real->SetVertexShader(s);
 }
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Reset(D3DPRESENT_PARAMETERS* pp)

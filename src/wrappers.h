@@ -154,8 +154,9 @@ public:
     HRESULT STDMETHODCALLTYPE GetVertexDeclaration(IDirect3DVertexDeclaration9** d) override { return m_real->GetVertexDeclaration(d); }
     HRESULT STDMETHODCALLTYPE SetFVF(DWORD f) override { return m_real->SetFVF(f); }
     HRESULT STDMETHODCALLTYPE GetFVF(DWORD* f) override { return m_real->GetFVF(f); }
-    HRESULT STDMETHODCALLTYPE CreateVertexShader(const DWORD* fn, IDirect3DVertexShader9** s) override { return m_real->CreateVertexShader(fn, s); }
-    HRESULT STDMETHODCALLTYPE SetVertexShader(IDirect3DVertexShader9* s) override { return m_real->SetVertexShader(s); }
+    // Intercepted for CTAB constant discovery - see shader_registry.h.
+    HRESULT STDMETHODCALLTYPE CreateVertexShader(const DWORD* fn, IDirect3DVertexShader9** s) override;
+    HRESULT STDMETHODCALLTYPE SetVertexShader(IDirect3DVertexShader9* s) override;
     HRESULT STDMETHODCALLTYPE GetVertexShader(IDirect3DVertexShader9** s) override { return m_real->GetVertexShader(s); }
     HRESULT STDMETHODCALLTYPE GetVertexShaderConstantF(UINT r, float* d, UINT c) override { return m_real->GetVertexShaderConstantF(r, d, c); }
     HRESULT STDMETHODCALLTYPE SetVertexShaderConstantI(UINT r, const int* d, UINT c) override { return m_real->SetVertexShaderConstantI(r, d, c); }
