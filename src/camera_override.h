@@ -1,21 +1,40 @@
 // Phase 3a: write-side control over the camera.
 //
-// Before involving OpenXR at all, we need to prove one thing: that writing our
-// own values into the camera registers actually moves the rendered view. If it
-// does, every later phase is a matter of choosing what to write. If it does not,
-// the registers we found are read by something other than the main scene
-// transform and we need to know that now, not after building a VR runtime layer.
+// FINDING (2026-08-13): overriding c185-c188 made fog and tree limbs SHIFT
+// slightly - not vanish, not spin - and c189-c192 did nothing visible. So
+// those blocks are genuine camera data, but only a subset of shaders reads
+// them (billboarded vegetation, fog), and the main opaque geometry does not.
+// A small shift rather than a full sweep says the value is consumed for a
+// secondary purpose, not as the primary transform. BFBC2 pre-multiplies
+// world-view-projection per object on the CPU - ~456 draws per frame each
+// rewriting c6..c18.
 //
-// The test is a synthetic yaw that advances on its own, independent of the
-// mouse. Two separate toggles, because Phase 2 found two candidate blocks and
-// only measurement can say which one drives the picture:
+// THE CORRECTION TRICK
 //
-//   F7  toggle override of c185-c188  (view-projection)
-//   F8  toggle override of c189-c192  (camera-to-world)
-//   F6  reset the synthetic angle to zero
+// A per-object matrix maps object space straight to clip space:
+//     v_clip = v_object * WVP,   where WVP = World * View * Proj
 //
-// Turn one on. If the world starts swinging around you while your mouse sits
-// still, that block drives rendering and Phase 3 is proven.
+// We cannot edit View directly because it is already baked in. But we can
+// right-multiply by a correction that undoes the old camera and applies a new
+// one. Wanting  WVP' = World * (V'P')  with  V'P' = R * VP :
+//
+//     World       = WVP * VP^-1
+//     WVP'        = WVP * VP^-1 * R * VP
+//     CORRECTION  = VP^-1 * R * VP          <- computed ONCE per frame
+//     WVP'        = WVP * CORRECTION        <- one multiply per draw
+//
+// VP comes free from c185-c188, which Phase 2 already identified. And the same
+// correction is valid for VP itself, since VP * (VP^-1 * R * VP) = R * VP - so
+// one operation handles both per-object and global matrices.
+//
+// This is also exactly the mechanism Phases 4 and 5 need: substituting a
+// per-eye projection or an HMD pose is just a different R.
+//
+// PROBE CONTROLS - sweep the register file to find what drives the picture:
+//   F7  toggle the probe on/off
+//   F8  probe base + 1        (watch the log for the current base)
+//   F6  probe base - 1
+//   F5  reset the synthetic angle
 #pragma once
 
 #include <vector>
@@ -23,19 +42,19 @@
 namespace camover {
 
 // Register blocks located in Phase 2. See docs/phase2-results.md.
-constexpr unsigned kViewProjBase  = 185;   // c185..c188, view-projection
-constexpr unsigned kCamWorldBase  = 189;   // c189..c192, camera-to-world
+constexpr unsigned kViewProjBase = 185;   // c185..c188, view-projection
+constexpr unsigned kCamWorldBase = 189;   // c189..c192, camera-to-world
 
-// If this write touches an overridden block, fills `scratch` with a modified
-// copy and returns true; the caller must then forward `scratch` instead of the
-// game's buffer. Returns false when nothing needs changing, which is the
-// overwhelmingly common case and stays allocation-free.
+// Default probe start: the per-draw block, the prime suspect for the real
+// world-view-projection.
+constexpr unsigned kProbeDefault = 6;
+
+// If this write covers the probed block, fills `scratch` with a corrected copy
+// and returns true; the caller forwards `scratch` instead of the game's buffer.
 bool transform(unsigned start_register, const float* data, unsigned vec4_count,
                std::vector<float>& scratch);
 
-// Called once per presented frame: advances the synthetic angle and polls keys.
+// Once per presented frame: advance the angle, rebuild the correction, poll keys.
 void on_present();
-
-bool any_override_active();
 
 } // namespace camover
