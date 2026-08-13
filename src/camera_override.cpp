@@ -491,4 +491,17 @@ int  last_rendered_eye() { return (g_eye_swap > 0) ? g_last_eye : (g_last_eye ^ 
 bool stereo_active()     { return g_hmd_active && g_correct_on; }
 unsigned modified_last_frame() { return g_modified_last_frame; }
 
+bool game_proj_tangents(float& tan_half_h, float& tan_half_v)
+{
+    if (!g_have_vp) return false;
+    // VP = View * Proj with View's 3x3 a pure rotation, so |VP row0| = proj
+    // x-scale and |VP row1| = proj y-scale; tangent is the reciprocal.
+    const float lx = std::sqrt(g_vp[0]*g_vp[0] + g_vp[1]*g_vp[1] + g_vp[2]*g_vp[2]);
+    const float ly = std::sqrt(g_vp[4]*g_vp[4] + g_vp[5]*g_vp[5] + g_vp[6]*g_vp[6]);
+    if (lx < 1e-6f || ly < 1e-6f) return false;
+    tan_half_h = 1.0f / lx;
+    tan_half_v = 1.0f / ly;
+    return true;
+}
+
 } // namespace camover

@@ -289,12 +289,48 @@ bool submit_frame()
     vr::Texture_t* tex_l = mono ? &tex[fresh] : &tex[0];
     vr::Texture_t* tex_r = mono ? &tex[fresh] : &tex[1];
 
+    // THE FUSION FIX. Without bounds, the compositor stretches our symmetric
+    // ~55-degree image across each eye's ASYMMETRIC ~108-degree frustum -
+    // shifting the two panels in opposite directions (screen-center content
+    // landed panel-left in one eye, panel-right in the other; the corner
+    // stamps fell outside the visible crop entirely). That opposite shift is
+    // artificial disparity on everything, unfusable at any IPD.
+    //
+    // VRTextureBounds_t maps frustum tangents onto texture UVs:
+    //   u(x) = (x + tg) / (2*tg)  for game half-angle tangent tg
+    // evaluated at the eye frustum's raw tangents (GetProjectionRaw). Values
+    // outside [0,1] are expected - the headset sees wider than the game
+    // renders - and produce black borders there instead of stretching.
+    vr::VRTextureBounds_t bounds[2] = { { 0, 0, 1, 1 }, { 0, 0, 1, 1 } };
+    bool have_bounds = false;
+    float tgh = 0.0f, tgv = 0.0f;
+    if (vrtrack::system() && camover::game_proj_tangents(tgh, tgv)) {
+        for (int e = 0; e < 2; ++e) {
+            float l, r, t, b;
+            vrtrack::system()->GetProjectionRaw(e == 0 ? vr::Eye_Left : vr::Eye_Right, &l, &r, &t, &b);
+            bounds[e].uMin = (l + tgh) / (2.0f * tgh);
+            bounds[e].uMax = (r + tgh) / (2.0f * tgh);
+            bounds[e].vMin = (t + tgv) / (2.0f * tgv);
+            bounds[e].vMax = (b + tgv) / (2.0f * tgv);
+        }
+        have_bounds = true;
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            VRLOG("[comp] game tangents h=%.4f v=%.4f", tgh, tgv);
+            for (int e = 0; e < 2; ++e) {
+                VRLOG("[comp] eye %d bounds u=[%.3f, %.3f] v=[%.3f, %.3f]",
+                      e, bounds[e].uMin, bounds[e].uMax, bounds[e].vMin, bounds[e].vMax);
+            }
+        }
+    }
+
     stage("LockSubmissionQueue");
     g_interop_dev->LockSubmissionQueue();
     stage("Submit L");
-    const auto err_l = vr::VRCompositor()->Submit(vr::Eye_Left,  tex_l);
+    const auto err_l = vr::VRCompositor()->Submit(vr::Eye_Left,  tex_l, have_bounds ? &bounds[0] : nullptr);
     stage("Submit R");
-    const auto err_r = vr::VRCompositor()->Submit(vr::Eye_Right, tex_r);
+    const auto err_r = vr::VRCompositor()->Submit(vr::Eye_Right, tex_r, have_bounds ? &bounds[1] : nullptr);
     stage("ReleaseSubmissionQueue");
     g_interop_dev->ReleaseSubmissionQueue();
 

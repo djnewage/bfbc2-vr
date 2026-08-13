@@ -119,6 +119,8 @@ void orientation(float out3x3[9])
     std::memcpy(out3x3, g_rot, sizeof(g_rot));
 }
 
+vr::IVRSystem* system() { return g_system; }
+
 void shutdown()
 {
     if (g_system) {

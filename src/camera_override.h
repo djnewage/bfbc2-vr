@@ -79,4 +79,11 @@ bool stereo_active();
 // submission whenever this is zero.
 unsigned modified_last_frame();
 
+// Half-angle tangents of the game's live projection, recovered from the VP
+// matrix (rows 0/1 of VP are rows of a rotation scaled by the projection's
+// x/y factors, so tan = 1/|row|). Returns false until a VP has been seen.
+// The compositor needs these to tell SteamVR which slice of each eye's
+// frustum the game image actually covers.
+bool game_proj_tangents(float& tan_half_h, float& tan_half_v);
+
 } // namespace camover

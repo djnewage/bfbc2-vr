@@ -15,7 +15,7 @@
 // APIs for exactly this reason. OpenXR arrives with stereo in Phase 4.
 #pragma once
 
-namespace vr { struct HmdMatrix34_t; }
+namespace vr { struct HmdMatrix34_t; class IVRSystem; }
 
 namespace vrtrack {
 
@@ -42,5 +42,9 @@ bool have_pose();
 void orientation(float out3x3[9]);
 
 void shutdown();
+
+// The live IVRSystem, or null before init. Needed by the compositor path for
+// per-eye projection queries (GetProjectionRaw).
+vr::IVRSystem* system();
 
 } // namespace vrtrack
