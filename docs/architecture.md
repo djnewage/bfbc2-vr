@@ -47,6 +47,10 @@ This is openRBRVR's architecture, and it is the right one. The reasoning:
   to Vulkan, and Vulkan images go straight into an OpenXR swapchain. It also gets us a modern,
   maintained D3D9 implementation on Windows 11 drivers for free. openRBRVR and the
   `TheIronWolfModding/dxvk vr-dx9-rel` fork both prove this works on 32-bit D3D9 games.
+
+  **Confirmed in Phase 0:** BFBC2 runs on stock DXVK 3.0.2 x32, and upstream DXVK now ships
+  OpenVR *and* OpenXR extension providers — the plumbing openRBRVR needed a fork for. We can
+  build on stock DXVK rather than maintaining a fork. See `phase0-results.md`.
 - **Why not vorpX.** It's closed-source, and it structurally cannot do problem 3.
 
 ### The main risk with this approach
