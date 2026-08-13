@@ -29,7 +29,7 @@ UINT g_width = 0, g_height = 0;
 bool g_scene_ok   = false;   // compositor interface acquired
 bool g_interop_ok = false;
 bool g_enabled    = true;    // F4 kill switch - keeps the game playable if VR path hangs
-bool g_stamp_debug = true;   // paint eye/frame identity markers into eye textures
+bool g_stamp_debug = false;  // identity markers served their purpose (found the frustum bug)
 bool g_wgp_called = false;   // WaitGetPoses must precede the first Submit
 unsigned g_submits = 0, g_submit_errors = 0;
 
@@ -93,6 +93,59 @@ bool init_eye_texture()
     return true;
 }
 
+// Steam's F12 screenshot crashes the game in a VR scene session (overlay GPU
+// capture colliding with our submit path), so the mod takes its own: both eye
+// textures dumped as BMPs into the game directory on F10.
+void save_eye_bmps()
+{
+    static int shot = 0;
+    for (int e = 0; e < 2; ++e) {
+        if (!g_eye_tex[e]) continue;
+
+        IDirect3DSurface9* src = nullptr;
+        if (FAILED(g_eye_tex[e]->GetSurfaceLevel(0, &src)) || !src) continue;
+
+        IDirect3DSurface9* sys = nullptr;
+        if (FAILED(g_device->CreateOffscreenPlainSurface(g_width, g_height, D3DFMT_A8R8G8B8,
+                                                         D3DPOOL_SYSTEMMEM, &sys, nullptr)) || !sys) {
+            src->Release(); continue;
+        }
+
+        if (SUCCEEDED(g_device->GetRenderTargetData(src, sys))) {
+            D3DLOCKED_RECT lr = {};
+            if (SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+                char path[MAX_PATH];
+                _snprintf_s(path, sizeof(path), _TRUNCATE, "%sbfbc2vr_eye%c_%02d.bmp",
+                            vrlog::module_dir().c_str(), e == 0 ? 'L' : 'R', shot);
+                FILE* f = nullptr;
+                fopen_s(&f, path, "wb");
+                if (f) {
+                    const unsigned img = g_width * g_height * 4;
+                    unsigned char hdr[54] = { 'B','M' };
+                    *reinterpret_cast<unsigned*>(hdr + 2)  = 54 + img;
+                    *reinterpret_cast<unsigned*>(hdr + 10) = 54;
+                    *reinterpret_cast<unsigned*>(hdr + 14) = 40;
+                    *reinterpret_cast<int*>(hdr + 18)      = static_cast<int>(g_width);
+                    *reinterpret_cast<int*>(hdr + 22)      = -static_cast<int>(g_height);  // top-down
+                    *reinterpret_cast<short*>(hdr + 26)    = 1;
+                    *reinterpret_cast<short*>(hdr + 28)    = 32;
+                    *reinterpret_cast<unsigned*>(hdr + 34) = img;
+                    fwrite(hdr, 1, 54, f);
+                    const auto* row = static_cast<const unsigned char*>(lr.pBits);
+                    for (UINT y = 0; y < g_height; ++y, row += lr.Pitch)
+                        fwrite(row, 1, g_width * 4, f);
+                    fclose(f);
+                    VRLOG("[shot] wrote %s", path);
+                }
+                sys->UnlockRect();
+            }
+        }
+        sys->Release();
+        src->Release();
+    }
+    ++shot;
+}
+
 bool init_compositor()
 {
     if (g_scene_ok) return true;
@@ -145,6 +198,13 @@ bool submit_frame()
             g_enabled = !g_enabled;
             VRLOG("[comp] VR submission %s (F4)", g_enabled ? "ENABLED" : "DISABLED");
         }
+        down = now;
+    }
+    // HOME: the mod's own screenshot (Steam's F12 crashes VR scene sessions).
+    {
+        static bool down = false;
+        const bool now = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
+        if (now && !down && g_device) save_eye_bmps();
         down = now;
     }
 

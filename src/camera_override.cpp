@@ -91,7 +91,17 @@ std::map<std::pair<void*, unsigned>, int> g_fingerprints;
 unsigned g_fp_found = 0, g_fp_rejected = 0;
 float g_eye[3]         = {};   // camera position, from c192
 float g_cam_right[3]   = { 1, 0, 0 };   // camera right axis, from c189 row 0
+float g_cam_rows[9]    = { 1,0,0, 0,1,0, 0,0,1 };   // full camera-to-world 3x3
 bool  g_have_eye       = false;
+
+// FOV widening: scale the camera's x/y axes down by this factor inside the
+// correction, which makes the game render a WIDER field into the same image.
+// The submitted image's tangents grow by the same factor (see
+// game_proj_tangents), so the compositor displays it at correct angular size -
+// shrinking the black border around the "theater window". The game still
+// CPU-culls at its own narrower frustum, so expect pop-in at the edges as
+// this rises; that is the known cost until culling is addressed.
+float g_fov_widen = 1.0f;   // 1.0 = off; PgUp/PgDn adjust
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
 
@@ -283,6 +293,42 @@ void rebuild_correction()
     multiply(to_origin, rot, tmp);
     multiply(tmp, back, r);          // rotate about the eye, not the origin
 
+    // FOV widening: K = V * S * M_cw, a camera-space lateral shrink conjugated
+    // into world space. Scaling camera x/y by 1/widen before projection makes
+    // the same image cover widen-times the field. V and M_cw carry the eye
+    // position, so no extra recentering is needed.
+    if (g_fov_widen > 1.001f && g_have_eye) {
+        Mat4 mcw, view, scale, tmp2, k;
+        identity(mcw);
+        for (int r2 = 0; r2 < 3; ++r2)
+            for (int c2 = 0; c2 < 3; ++c2)
+                at(mcw, r2, c2) = g_cam_rows[r2 * 3 + c2];
+        at(mcw, 3, 0) = g_eye[0]; at(mcw, 3, 1) = g_eye[1]; at(mcw, 3, 2) = g_eye[2];
+
+        // Affine inverse of a rotation+translation: linear part transposes,
+        // translation is -eye through the transposed rotation.
+        identity(view);
+        for (int r2 = 0; r2 < 3; ++r2)
+            for (int c2 = 0; c2 < 3; ++c2)
+                at(view, r2, c2) = g_cam_rows[c2 * 3 + r2];
+        for (int c2 = 0; c2 < 3; ++c2) {
+            at(view, 3, c2) = -(g_eye[0] * at(view, 0, c2) +
+                                g_eye[1] * at(view, 1, c2) +
+                                g_eye[2] * at(view, 2, c2));
+        }
+
+        identity(scale);
+        at(scale, 0, 0) = 1.0f / g_fov_widen;
+        at(scale, 1, 1) = 1.0f / g_fov_widen;
+
+        multiply(view, scale, tmp2);
+        multiply(tmp2, mcw, k);
+
+        Mat4 combined;
+        multiply(k, rot, combined);
+        std::memcpy(rot, combined, sizeof(rot));
+    }
+
     // Stereo eye offset: shift the camera half an IPD along its right axis.
     // Shifting the CAMERA right by d == shifting the WORLD left by d, so the
     // world translation is -d for the right eye, +d for the left.
@@ -318,9 +364,12 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
         g_have_vp = true;
     }
     if (covers(start_register, vec4_count, kCamWorldBase)) {
-        const float* row0 = data + (kCamWorldBase + 0 - start_register) * 4;
-        const float* row3 = data + (kCamWorldBase + 3 - start_register) * 4;
-        g_cam_right[0] = row0[0]; g_cam_right[1] = row0[1]; g_cam_right[2] = row0[2];
+        const float* rows = data + (kCamWorldBase - start_register) * 4;
+        const float* row3 = rows + 3 * 4;
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                g_cam_rows[r * 3 + c] = rows[r * 4 + c];
+        g_cam_right[0] = g_cam_rows[0]; g_cam_right[1] = g_cam_rows[1]; g_cam_right[2] = g_cam_rows[2];
         g_eye[0] = row3[0]; g_eye[1] = row3[1]; g_eye[2] = row3[2];
         g_have_eye = true;
     }
@@ -468,6 +517,16 @@ void on_present()
         }
     }
 
+    // FOV widening (PgUp wider / PgDn narrower).
+    if (key_pressed(VK_PRIOR)) {
+        g_fov_widen = (g_fov_widen + 0.1f > 2.0f) ? 2.0f : g_fov_widen + 0.1f;
+        VRLOG("[fov] widen -> %.1fx", g_fov_widen);
+    }
+    if (key_pressed(VK_NEXT)) {
+        g_fov_widen = (g_fov_widen - 0.1f < 1.0f) ? 1.0f : g_fov_widen - 0.1f;
+        VRLOG("[fov] widen -> %.1fx", g_fov_widen);
+    }
+
     // Stereo calibration.
     if (key_pressed(VK_F1)) {
         g_eye_swap = -g_eye_swap;
@@ -499,8 +558,10 @@ bool game_proj_tangents(float& tan_half_h, float& tan_half_v)
     const float lx = std::sqrt(g_vp[0]*g_vp[0] + g_vp[1]*g_vp[1] + g_vp[2]*g_vp[2]);
     const float ly = std::sqrt(g_vp[4]*g_vp[4] + g_vp[5]*g_vp[5] + g_vp[6]*g_vp[6]);
     if (lx < 1e-6f || ly < 1e-6f) return false;
-    tan_half_h = 1.0f / lx;
-    tan_half_v = 1.0f / ly;
+    // Widened rendering covers widen-times the field; the bounds must match
+    // the image actually submitted, not the game's native projection.
+    tan_half_h = g_fov_widen / lx;
+    tan_half_v = g_fov_widen / ly;
     return true;
 }
 
