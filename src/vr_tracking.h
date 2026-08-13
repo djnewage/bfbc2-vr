@@ -47,4 +47,10 @@ void shutdown();
 // per-eye projection queries (GetProjectionRaw).
 vr::IVRSystem* system();
 
+// The user's real interpupillary distance in meters, from the headset's own
+// setting (the Index's physical slider). 0 until known. Frostbite is a metric
+// engine, so this is directly the correct world-space eye separation - the
+// keystone of zero-calibration stereo.
+float user_ipd_meters();
+
 } // namespace vrtrack

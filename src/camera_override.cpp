@@ -43,6 +43,14 @@ int   g_last_eye     = 0;       // eye the just-presented frame used
 float g_ipd_world    = 0.064f;  // world-units offset between eyes
 float g_eye_swap     = 1.0f;    // -1 swaps left/right
 
+// Zero-calibration: IPD comes from the headset's own setting (Frostbite is
+// metric, so meters ARE world units), and tracking engages by itself when a
+// pose appears. F2/F3 switch to manual mode for world-scale experiments;
+// F7 remains the master toggle and remembers an explicit off.
+bool g_ipd_manual    = false;
+bool g_auto_engaged  = false;   // auto-enable fired once
+bool g_user_disabled = false;   // user explicitly F7'd off - respect it
+
 // Yaw/pitch of the HMD forward vector in OpenVR space (right-handed, Y-up,
 // forward -Z). Yaw 0 = facing -Z; positive = turning toward -X (left).
 void hmd_yaw_pitch(float& yaw, float& pitch)
@@ -439,6 +447,24 @@ void on_present()
     // Head tracking: refresh the pose and, while enabled, convert it to a
     // yaw/pitch delta against the reference captured when tracking engaged.
     vrtrack::update();
+
+    // Auto-engage: the first valid pose turns VR mode on, like a native VR
+    // title - no keypress required. An explicit F7-off stays off.
+    if (!g_auto_engaged && !g_user_disabled && !g_correct_on && vrtrack::have_pose()) {
+        g_correct_on = true;
+        g_auto_engaged = true;
+        VRLOG("[vr] auto-engaged - HMD pose available");
+    }
+
+    // Auto-IPD: track the headset's real setting until the user goes manual.
+    if (!g_ipd_manual) {
+        const float real = vrtrack::user_ipd_meters();
+        if (real > 0.0f && std::fabs(real - g_ipd_world) > 0.0005f) {
+            g_ipd_world = real;
+            VRLOG("[stereo] IPD from headset: %.4f m", g_ipd_world);
+        }
+    }
+
     if (g_correct_on && vrtrack::have_pose()) {
         float yaw, pitch;
         hmd_yaw_pitch(yaw, pitch);
@@ -486,6 +512,7 @@ void on_present()
 
     if (key_pressed(VK_F7)) {
         g_correct_on = !g_correct_on;
+        g_user_disabled = !g_correct_on;   // an explicit off suppresses auto-engage
         VRLOG("[correct] %s  (convention=%s, vp=%d eye=%d correction=%d)",
               g_correct_on ? "ON" : "off", g_transposed ? "transposed" : "row-registers",
               (int)g_have_vp, (int)g_have_eye, (int)g_have_correction);
@@ -533,16 +560,24 @@ void on_present()
         VRLOG("[stereo] eyes %s", g_eye_swap > 0 ? "normal" : "SWAPPED");
     }
     if (key_pressed(VK_F2)) {
+        g_ipd_manual = true;
         g_ipd_world *= 0.8f;
         // The multiplicative step approaches zero but never reaches it; floor
         // to a true zero so "identical corrections in both eyes" is testable.
         if (g_ipd_world < 0.0005f) g_ipd_world = 0.0f;
-        if (g_ipd_world == 0.0f) VRLOG("[stereo] IPD -> 0 (disabled)");
-        else                     VRLOG("[stereo] IPD -> %.4f world units", g_ipd_world);
+        if (g_ipd_world == 0.0f) VRLOG("[stereo] IPD -> 0 (disabled, manual)");
+        else                     VRLOG("[stereo] IPD -> %.4f world units (manual)", g_ipd_world);
     }
     if (key_pressed(VK_F3)) {
-        g_ipd_world = (g_ipd_world == 0.0f) ? 0.008f : g_ipd_world * 1.25f;
-        VRLOG("[stereo] IPD -> %.4f world units", g_ipd_world);
+        // Shift+F3: back to automatic headset IPD. Plain F3: manual step up.
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+            g_ipd_manual = false;
+            VRLOG("[stereo] IPD back to automatic (headset)");
+        } else {
+            g_ipd_manual = true;
+            g_ipd_world = (g_ipd_world == 0.0f) ? 0.008f : g_ipd_world * 1.25f;
+            VRLOG("[stereo] IPD -> %.4f world units (manual)", g_ipd_world);
+        }
     }
 }
 

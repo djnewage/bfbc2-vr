@@ -121,6 +121,25 @@ void orientation(float out3x3[9])
 
 vr::IVRSystem* system() { return g_system; }
 
+float user_ipd_meters()
+{
+    if (!g_system) return 0.0f;
+
+    // Re-query on a slow cadence: the Index has a physical IPD slider the
+    // user can move mid-session, and SteamVR updates the property live.
+    static float cached = 0.0f;
+    static ULONGLONG last_query = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (cached == 0.0f || now - last_query > 3000) {
+        last_query = now;
+        vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+        const float v = g_system->GetFloatTrackedDeviceProperty(
+            vr::k_unTrackedDeviceIndex_Hmd, vr::Prop_UserIpdMeters_Float, &err);
+        if (err == vr::TrackedProp_Success && v > 0.03f && v < 0.09f) cached = v;
+    }
+    return cached;
+}
+
 void shutdown()
 {
     if (g_system) {
