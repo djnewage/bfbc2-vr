@@ -135,6 +135,8 @@ size_t scan_range(float lo, float hi)
     return g_cands.size();
 }
 
+const char* where(const void* p);
+
 // Every object whose first dword is `vtable`: list base addresses and the
 // float at `offset` (default +0x50, where the camera class keeps its FOV).
 void list_objects(unsigned vtable, unsigned offset, unsigned limit)
