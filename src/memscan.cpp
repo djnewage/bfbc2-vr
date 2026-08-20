@@ -307,7 +307,13 @@ void hunt2_tick()
     case 0: {
         camover::world_tangents(g_h2_th0, g_h2_tv0);
         const bool fg = focus_game();
-        VRLOG("[hunt2] T0 tangents %.4f/%.4f; focus %s; pressing RMB (aim down sights)", g_h2_th0, g_h2_tv0, fg ? "ok" : "FAILED (input may not reach the game)");
+        if (!fg) {
+            // Never inject input into whatever else is in the foreground.
+            VRLOG("[hunt2] ABORT: could not bring the game window to the foreground; click the game window and rerun hunt2");
+            g_h2_phase = -1;
+            return;
+        }
+        VRLOG("[hunt2] T0 tangents %.4f/%.4f; game focused; pressing RMB (aim down sights)", g_h2_th0, g_h2_tv0);
         send_mouse_button(true, true);
         g_h2_phase = 1; g_h2_wait = 0;
         return;
@@ -525,7 +531,7 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
     }
     if (!strcmp(cmd, "rmb") || !strcmp(cmd, "lmb")) {
         const bool down = has1 && !_stricmp(a1, "down");
-        focus_game();
+        if (!focus_game()) { _snprintf_s(reply, n, _TRUNCATE, "%s: game not in foreground - refusing to inject input", cmd); return true; }
         send_mouse_button(cmd[0] == 'r', down);
         _snprintf_s(reply, n, _TRUNCATE, "%s %s", cmd, down ? "down" : "up");
         return true;
@@ -533,7 +539,7 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
     if (!strcmp(cmd, "key")) {
         if (!has1) { _snprintf_s(reply, n, _TRUNCATE, "usage: key <vk-hex> down|up|tap"); return true; }
         const WORD vk = static_cast<WORD>(strtoul(a1, nullptr, 16));
-        focus_game();
+        if (!focus_game()) { _snprintf_s(reply, n, _TRUNCATE, "key: game not in foreground - refusing to inject input"); return true; }
         if (!has2 || !_stricmp(a2, "tap")) { send_key(vk, true); send_key(vk, false); }
         else send_key(vk, !_stricmp(a2, "down"));
         _snprintf_s(reply, n, _TRUNCATE, "key 0x%02X %s", vk, has2 ? a2 : "tap");
