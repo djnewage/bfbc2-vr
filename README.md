@@ -47,6 +47,7 @@ tools/recon.ps1        re-runnable environment probe
 | Project | Relevance |
 |---|---|
 | [openRBRVR](https://github.com/Detegr/openRBRVR) | Primary architectural template — D3D9 + DXVK + OpenXR, 6DOF |
+| [BFVR (Battlefield 1942 VR)](https://github.com/JayBiggsGMG/BFVR-Battlefield-1942-VR-Mod) | Shipped sibling mod: viewmodel classification, grip math, cull-FOV hook, HUD layer, engine input hooks — see `docs/prior-art-bfvr.md` |
 | [TheIronWolfModding/dxvk `vr-dx9-rel`](https://github.com/TheIronWolfModding/dxvk/tree/vr-dx9-rel) | The DXVK fork that adds D3D9 VR support |
 | [Helix Mod BFBC2 DX9 fix](https://helixmod.blogspot.com/2013/04/battlefield-bad-company-2dx9.html) | Stereo shader constants for our exact target |
 | [DarkStarSword/3d-fixes](https://github.com/DarkStarSword/3d-fixes) | Helix/3DMigoto fix corpus + tooling |
