@@ -121,6 +121,15 @@ ProjClass compare_projection(const ProjParams& draw, const ProjParams& world, co
     return ProjClass::Same;
 }
 
+ProjParams correction_projection(const ProjParams& draw, const ProjParams& world, const Tolerances& tol)
+{
+    ProjParams p = draw;
+    if (!draw.perspective || !world.perspective) return p;
+    if (std::fabs(draw.a / world.a - 1.0f) <= tol.fov_ratio_eps) p.a = world.a;
+    if (std::fabs(draw.b / world.b - 1.0f) <= tol.fov_ratio_eps) p.b = world.b;
+    return p;
+}
+
 const char* draw_class_name(DrawClass c)
 {
     switch (c) {

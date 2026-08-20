@@ -198,8 +198,65 @@ static void test_viewmodel_correction_collapses_to_global()
     CHECK_NEAR(h.a, world.a, 0.0f); CHECK_NEAR(h.t, p.t, 0.0f);
 }
 
+// THE 2026-08-20 FINDING. BFBC2 renders ~94% of the scene with projections
+// whose near plane is 7.48 m or 21.34 m (depth slices) while VP carries the
+// 0.1 m one. The global correction VP^-1 r VP applied to such a draw leaves a
+// P' P^-1 residue that multiplies every TRANSLATION in r (eye offset, 6DOF,
+// push) by t'/t = 75 or 213, while rotation stays exact. Looking around
+// worked; stereo and leaning warped the world. The per-draw correction built
+// around the draw's own P is exact.
+static void test_depth_slice_translation_is_exact()
+{
+    ProjParams p; p.a = 1.8062f; p.b = 2.4083f; p.q = 1.0001f; p.t = -0.1f * p.q; p.perspective = true;
+    ProjParams p2 = p; p2.t = -7.48f * p2.q;           // the 7.48 m slice
+    Mat4 P, P2; make_projection(p, P); make_projection(p2, P2);
+    const float eye[3] = { 243.0f, 174.0f, -148.0f };
+    Mat4 V; make_view(eye, 0.6f, V);
+    Mat4 VP; m4::multiply(V, P, VP);
+
+    // r = pure translation (an eye shift of 3.3 cm along world x).
+    Mat4 r; m4::translation(0.033f, 0.0f, 0.0f, r);
+    Mat4 W; m4::translation(250.0f, 176.0f, -160.0f, W);   // an object ~15 m out
+    Mat4 WV, M2; m4::multiply(W, V, WV); m4::multiply(WV, P2, M2);   // drawn with the slice P
+
+    // Ground truth: W * r * V * P2.
+    Mat4 Wr, WrV, truth; m4::multiply(W, r, Wr); m4::multiply(Wr, V, WrV); m4::multiply(WrV, P2, truth);
+
+    // Global correction: wrong by the slice ratio.
+    Mat4 VPi, g1, global, Mg; CHECK(m4::invert(VP, VPi));
+    m4::multiply(VPi, r, g1); m4::multiply(g1, VP, global); m4::multiply(M2, global, Mg);
+    float og[3], ot[3];
+    ProjParams rg; CHECK(recover_projection(Mg, rg)); CHECK(view_origin(Mg, rg, og));
+    ProjParams rt; CHECK(recover_projection(truth, rt)); CHECK(view_origin(truth, rt, ot));
+    auto dist3 = [](const float* a, const Mat4 m) {
+        const float dx = a[0]-at(m,3,0), dy = a[1]-at(m,3,1), dz = a[2]-at(m,3,2);
+        return std::sqrt(dx*dx + dy*dy + dz*dz);
+    };
+    const float shift_truth  = dist3(ot, WV);
+    const float shift_global = dist3(og, WV);
+    CHECK_NEAR(shift_truth, 0.033f, 2e-3f);
+    CHECK(shift_global > 1.0f);                         // ~75x the intended shift
+
+    // Per-draw correction around P2: exact.
+    Mat4 Vi, c1, c_view; CHECK(m4::invert(V, Vi));
+    m4::multiply(Vi, r, c1); m4::multiply(c1, V, c_view);
+    Mat4 I; m4::identity(I);
+    Mat4 own, Mo; CHECK(build_viewmodel_correction(p2, I, c_view, p2, own));
+    m4::multiply(M2, own, Mo);
+    CHECK(near_matrix(Mo, truth, 1e-2f));
+
+    // Snapping: a/b within tolerance take the world's, q/t stay the draw's.
+    ProjParams d = p2; d.a *= 1.01f;
+    ProjParams c = correction_projection(d, p);
+    CHECK_NEAR(c.a, p.a, 0.0f); CHECK_NEAR(c.t, p2.t, 0.0f);
+    d.a = p.a * 1.55f;
+    c = correction_projection(d, p);
+    CHECK_NEAR(c.a, d.a, 0.0f);
+}
+
 int main()
 {
+    test_depth_slice_translation_is_exact();
     test_recover_roundtrip();
     test_rejects_non_perspective();
     test_compare_and_classify();

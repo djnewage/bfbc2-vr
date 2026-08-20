@@ -68,8 +68,8 @@ grip delta later, same slot — BFVR's `World·sourceView·gripDelta·residualEy
 | mode (DELETE / `[`) | `P_sel` | Expect |
 |---|---|---|
 | 0 | — (global correction for everything) | today's behaviour |
-| **1 (default)** | the weapon's own P | the Phase-3 distortion gone; if `P_vm == P` this is identical to mode 0 |
-| 2 | world field, weapon's near plane | VR-correct angular size, no near clipping |
+| 1 | the weapon's own P | the Phase-3 distortion gone; if `P_vm == P` this is identical to mode 0 |
+| **2 (default)** | world field, weapon's near plane | VR-correct angular size, no near clipping |
 | 3 | world P outright | as 2, but may clip at the world near plane |
 
 Push (`=`) moves the weapon out along the body's forward, both eyes together; `-`
@@ -85,6 +85,31 @@ view-space distance histogram of all corrected writes.
 | Key | Action |
 |---|---|
 | `]` | 4-frame draw census → `bfbc2vr_draws_NN.txt` |
+| Shift+`]` | toggle per-draw own-projection correction (off = old global path, warps) |
 | DELETE or `[` | cycle viewmodel projection mode 0→1→2→3 |
 | Shift + (DELETE or `[`) | toggle classifier bone requirement |
 | `-` / `=` | viewmodel push −/+ 0.05 m |
+
+## 4. Census result (2026-08-20, same day): the depth-slice finding
+
+`bfbc2vr_draws_08.txt` (outdoor scene, 2048×1536): **670 of ~716 scene draws per frame are
+drawn with a near plane of 7.48 m or 21.34 m**, 46 with 0.1 m. Frostbite renders the view
+in depth slices for Z precision; VP (c185) carries only the 0.1 m projection.
+
+For a draw with its own `P'`, the global correction `VP⁻¹·r·VP` leaves `P'·P⁻¹` in front of
+`r`. That residue is `[[1,0,0,0],[0,1,0,0],[0,0,1,(q'−q)/t],[0,0,0,t'/t]]`: rotation about the
+eye passes through exactly, but **every translation in `r` — eye offset, 6DOF lean, push — is
+multiplied by `t'/t` = 75 (7.48 m slice) or 213 (21.34 m slice)**. A 3.3 cm eye shift became
+2.5 m; a 10 cm lean moved the far world 7–21 m. That is the "world warps around me, but I can
+still look around" report, and it has been present since stereo first lit up. The unit test
+`test_depth_slice_translation_is_exact` pins it.
+
+Consequence: the per-draw correction `P_d⁻¹ · C_view · P_d` (built around each draw's own
+recovered projection, cached per distinct `P_d`, ~4 per frame) is now the **default for every
+recoverable write**; the global form is its `P_d == P` special case and remains only as the
+fallback for writes whose projection cannot be recovered. `a/b` are snapped to the world's when
+within 2 % so a non-rigid World cannot leak into the field; `q/t` are always the draw's own.
+**Shift+`]`** toggles the old global-only path for A/B — expect the warp to come back.
+
+The weapon (bone shaders, own FOV tan 0.357/0.268) is the only class that also gets an offset;
+default mode is now **2 (hybrid)**: world field of view, weapon's own depth range.

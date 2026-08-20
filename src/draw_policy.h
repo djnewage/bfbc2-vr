@@ -84,6 +84,14 @@ struct Tolerances {
 ProjClass compare_projection(const ProjParams& draw, const ProjParams& world,
                              const Tolerances& tol = Tolerances{});
 
+// The projection a draw should be corrected AROUND. a/b are snapped to the
+// world's when within tolerance (a non-rigid World would otherwise leak into
+// the recovered field and warp that one draw); q/t are always the draw's own,
+// because the engine renders the scene in depth slices (near 0.1 / 7.48 /
+// 21.34 m seen) and the near plane is exactly what must not be assumed.
+ProjParams correction_projection(const ProjParams& draw, const ProjParams& world,
+                                 const Tolerances& tol = Tolerances{});
+
 // Everything the classifier is allowed to look at. Filled by the hook from
 // the stored matrix, the active shader's CTAB, and the global VP.
 struct DrawSignature {

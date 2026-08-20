@@ -154,8 +154,18 @@ bool  g_fov_auto    = true;
 // push today, a controller grip delta later - applied BEFORE the eye offset so
 // both eyes share one adjusted weapon pose. Minus/Equals tune the push,
 // DELETE cycles which projection the weapon is re-rendered with.
+// FINDING 2026-08-20 (census 08): ~94% of the scene is drawn with a near
+// plane of 7.48 m or 21.34 m - the engine renders in DEPTH SLICES - while VP
+// carries 0.1 m. For such a draw the global VP^-1 r VP leaves a P' P^-1
+// residue that multiplies every translation in r (eye offset, 6DOF lean,
+// push) by t'/t = 75 or 213 while rotation stays exact: looking around
+// worked, stereo and leaning warped the world. So the correction is now
+// built per draw around the draw's OWN projection (cached per distinct P,
+// ~4 per frame); the global form is just the P' == P special case and stays
+// as the fallback for writes whose projection cannot be recovered.
 float g_vm_push   = 0.0f;    // metres forward along the body camera; 0 = none
-int   g_vm_mode   = 1;       // 0 off, 1 own P (distortion fix only), 2 hybrid, 3 world P
+int   g_vm_mode   = 2;       // weapon projection: 0 own P, 1 own P, 2 hybrid (world field, own depth), 3 world P
+bool  g_ownproj_on = true;   // Shift+']' toggles, for A/B against the old global-only path
 drawpolicy::Thresholds g_vm_th;
 drawpolicy::ProjParams g_world_proj;      // recovered from VP once per frame
 float g_cview[16] = {};                   // V^-1 * r * V: the frame's correction in view space
@@ -173,7 +183,6 @@ struct VmCorrection {
     float    c[16] = {};
     bool     valid = false;
 };
-VmCorrection g_vmcorr[2];   // [0] own-projection only, [1] viewmodel with offset
 
 // View-space distance histogram of every corrected write, so the scene's
 // distribution stays measurable (and the viewmodel band visible).
@@ -465,34 +474,51 @@ void rebuild_correction()
     if (!drawpolicy::recover_projection(g_vp, g_world_proj)) {
         g_world_proj = drawpolicy::ProjParams{};
     }
-    g_vmcorr[0].valid = g_vmcorr[1].valid = false;   // rebuilt lazily per frame
+    // Per-draw corrections are rebuilt lazily; frame index keys the cache.
 }
 
 // Correction for a draw rendered with its own projection `p`, cached per
 // frame. with_offset = the weapon (push / grip delta, projection per DELETE
 // mode); without = own-projection scene passes (corrected around their own P,
 // which is kept, no offset). Null = caller uses the global correction.
+constexpr size_t kVmCache = 8;
+VmCorrection g_owncache[kVmCache];   // per distinct projection this frame
+unsigned g_owncache_next = 0;
+
 const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_offset)
 {
-    if (!g_have_cview || g_vm_mode <= 0) return nullptr;
-    VmCorrection& vc = g_vmcorr[with_offset ? 1 : 0];
-    const bool same_key = vc.valid && vc.frame == g_frame_index &&
-        vc.key.a == p.a && vc.key.b == p.b && vc.key.q == p.q && vc.key.t == p.t;
-    if (same_key) return vc.c;
+    if (!g_have_cview || !g_ownproj_on) return nullptr;
 
-    drawpolicy::ProjSelect sel = drawpolicy::ProjSelect::Viewmodel;
-    if (with_offset && g_vm_mode == 2) sel = drawpolicy::ProjSelect::Hybrid;
-    if (with_offset && g_vm_mode == 3) sel = drawpolicy::ProjSelect::World;
-    const drawpolicy::ProjParams psel = drawpolicy::select_projection(sel, p, g_world_proj);
+    // Weapon: offset + projection per mode. Everything else: around its own
+    // P (a/b snapped to the world's when within tolerance), no offset.
+    drawpolicy::ProjParams psel = p;
+    if (with_offset) {
+        drawpolicy::ProjSelect sel = drawpolicy::ProjSelect::Viewmodel;
+        if (g_vm_mode == 2) sel = drawpolicy::ProjSelect::Hybrid;
+        if (g_vm_mode == 3) sel = drawpolicy::ProjSelect::World;
+        psel = drawpolicy::select_projection(sel, p, g_world_proj);
+    } else {
+        psel = drawpolicy::correction_projection(p, g_world_proj);
+    }
+
+    // Cache per (p, with_offset) for this frame.
+    VmCorrection* slot = nullptr;
+    for (size_t i = 0; i < kVmCache; ++i) {
+        VmCorrection& vc = g_owncache[i];
+        if (vc.valid && vc.frame == g_frame_index && vc.with_offset == with_offset &&
+            vc.key.a == p.a && vc.key.b == p.b && vc.key.q == p.q && vc.key.t == p.t) return vc.c;
+        if (!slot && (!vc.valid || vc.frame != g_frame_index)) slot = &vc;
+    }
+    if (!slot) slot = &g_owncache[g_owncache_next++ % kVmCache];   // round-robin if a frame has more
 
     Mat4 delta;
     translation(0.0f, 0.0f, with_offset ? g_vm_push : 0.0f, delta);   // D3D view space: +z forward
 
-    vc.key = p;
-    vc.with_offset = with_offset;
-    vc.frame = g_frame_index;
-    vc.valid = drawpolicy::build_viewmodel_correction(p, delta, g_cview, psel, vc.c);
-    return vc.valid ? vc.c : nullptr;
+    slot->key = p;
+    slot->with_offset = with_offset;
+    slot->frame = g_frame_index;
+    slot->valid = drawpolicy::build_viewmodel_correction(p, delta, g_cview, psel, slot->c);
+    return slot->valid ? slot->c : nullptr;
 }
 
 } // namespace
@@ -568,14 +594,16 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
                 for (int i = 0; i < 5; ++i) { if (sig.view_dist < kBuckets[i]) { b = i; break; } }
                 ++g_vm_hist[b];
             }
-            const drawpolicy::DrawClass cls = (g_vm_mode > 0)
-                ? drawpolicy::classify(sig, g_vm_th) : drawpolicy::DrawClass::Unclassified;
+            const drawpolicy::DrawClass cls = drawpolicy::classify(sig, g_vm_th);
             if (cls == drawpolicy::DrawClass::Viewmodel) {
                 ++g_vm_hits;
                 const float* vm = viewmodel_correction(p, true);
                 if (vm) corr = vm;
-            } else if (cls == drawpolicy::DrawClass::OwnProjection) {
-                ++g_vm_ownp;
+            } else if (persp) {
+                // Every recoverable draw is corrected around ITS projection.
+                // Same P as the world -> identical to the global correction;
+                // a depth slice -> the translations stay true to scale.
+                if (cls == drawpolicy::DrawClass::OwnProjection) ++g_vm_ownp;
                 const float* vm = viewmodel_correction(p, false);
                 if (vm) corr = vm;
             }
@@ -770,8 +798,8 @@ void on_present()
         VRLOG("[correct] %s: modified %u transform writes last frame (fingerprints: %u found, %u none)",
               g_transposed ? "transposed" : "row-registers", g_modified_last_frame,
               g_fp_found, g_fp_rejected);
-        VRLOG("[viewmodel] mode=%d push=%.2fm require_bones=%d: %u VIEWMODEL writes, %u own-projection writes; world P tan=%.4f/%.4f near=%.3f",
-              g_vm_mode, g_vm_push, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last,
+        VRLOG("[viewmodel] mode=%d push=%.2fm ownproj=%d require_bones=%d: %u VIEWMODEL writes, %u depth-slice/own-P writes; world P tan=%.4f/%.4f near=%.3f",
+              g_vm_mode, g_vm_push, g_ownproj_on ? 1 : 0, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last,
               g_world_proj.tan_half_h(), g_world_proj.tan_half_v(), g_world_proj.near_z());
         VRLOG("[vm-hist] view-space <0.1m:%u  <0.5m:%u  <1m:%u  <2m:%u  <5m:%u  >5m:%u",
               g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2],
@@ -859,14 +887,20 @@ void on_present()
             VRLOG("[viewmodel] classifier require_bones=%d", g_vm_th.require_bones ? 1 : 0);
         } else {
             g_vm_mode = (g_vm_mode + 1) % 4;
-            static const char* names[4] = { "OFF (global correction for all)", "own P (distortion fix)", "hybrid (world field, own depth)", "world P" };
+            static const char* names[4] = { "own P", "own P (distortion fix)", "hybrid (world field, own depth)", "world P" };
             VRLOG("[viewmodel] mode %d: %s", g_vm_mode, names[g_vm_mode]);
         }
     }
     // ']' : draw census - 4 frames of per-draw signatures to bfbc2vr_draws_NN.txt.
     // (Was INSERT; not every keyboard has one.)
     if (key_pressed(VK_OEM_6)) {
-        drawdiag::request_capture(4);
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+            g_ownproj_on = !g_ownproj_on;
+            VRLOG("[viewmodel] per-draw own-projection correction %s (off = old global-only path, expect the depth-slice warp)",
+                  g_ownproj_on ? "ON" : "OFF");
+        } else {
+            drawdiag::request_capture(4);
+        }
     }
 
     // Stereo calibration.
