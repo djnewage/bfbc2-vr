@@ -53,6 +53,25 @@ bool writable(DWORD protect)
     return (protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
+// Our own big buffers must never be scanned: a scan for value V stores V in
+// g_cands (the `original` field), and the next region sweep would find those
+// copies and feed on itself (seen: 2,000,000 "matches" of one vtable pointer).
+struct Exclude { const char* lo; const char* hi; };
+Exclude g_excl[4] = {};
+size_t  g_excl_n = 0;
+template <typename V>
+void exclude_vector(const V& v)
+{
+    if (g_excl_n >= 4 || v.capacity() == 0) return;
+    const char* lo = reinterpret_cast<const char*>(v.data());
+    g_excl[g_excl_n++] = { lo, lo + v.capacity() * sizeof(typename V::value_type) };
+}
+bool excluded(const char* p)
+{
+    for (size_t i = 0; i < g_excl_n; ++i) if (p >= g_excl[i].lo && p < g_excl[i].hi) return true;
+    return false;
+}
+
 // Visit every committed writable region (excluding our own DLL).
 template <typename F>
 void for_each_region(F&& fn)
@@ -67,7 +86,20 @@ void for_each_region(F&& fn)
         const char* next = base + mbi.RegionSize;
         if (mbi.State == MEM_COMMIT && writable(mbi.Protect) && mbi.RegionSize <= (512u << 20) &&
             !(base >= g_self_lo && base < g_self_hi)) {
-            fn(base, mbi.RegionSize);
+            // Split around our own buffers rather than skipping whole regions.
+            const char* cur = base;
+            const char* stop = base + mbi.RegionSize;
+            while (cur < stop) {
+                const char* seg_end = stop;
+                bool inside = false;
+                for (size_t i = 0; i < g_excl_n; ++i) {
+                    if (cur >= g_excl[i].lo && cur < g_excl[i].hi) { cur = g_excl[i].hi; inside = true; break; }
+                    if (g_excl[i].lo > cur && g_excl[i].lo < seg_end) seg_end = g_excl[i].lo;
+                }
+                if (inside) continue;
+                if (seg_end > cur) fn(cur, static_cast<size_t>(seg_end - cur));
+                cur = seg_end;
+            }
         }
         if (next <= p) break;
         p = next;
@@ -88,11 +120,47 @@ void scan_region(const char* base, size_t size, float lo, float hi)
     }
 }
 
-size_t scan_range(float lo, float hi)
+void prepare_scan()
 {
     g_cands.clear();
+    if (g_cands.capacity() < kMaxCandidates) g_cands.reserve(kMaxCandidates);   // stable buffer
+    g_excl_n = 0;
+    exclude_vector(g_cands);
+}
+
+size_t scan_range(float lo, float hi)
+{
+    prepare_scan();
     for_each_region([&](const char* base, size_t size) { scan_region(base, size, lo, hi); });
     return g_cands.size();
+}
+
+// Every object whose first dword is `vtable`: list base addresses and the
+// float at `offset` (default +0x50, where the camera class keeps its FOV).
+void list_objects(unsigned vtable, unsigned offset, unsigned limit)
+{
+    prepare_scan();
+    for_each_region([&](const char* base, size_t size) {
+        __try {
+            const unsigned* w = reinterpret_cast<const unsigned*>(base);
+            for (size_t i = 0; i < size / 4 && g_cands.size() < kMaxCandidates; ++i) {
+                if (w[i] == vtable) {
+                    float fv = 0.0f;
+                    g_cands.push_back({ const_cast<float*>(reinterpret_cast<const float*>(w + i)), fv });
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    });
+    unsigned shown = 0;
+    for (const Candidate& c : g_cands) {
+        if (shown++ >= limit) break;
+        float fv = 0.0f; unsigned bits = 0;
+        const char* obj = reinterpret_cast<const char*>(c.addr);
+        __try { std::memcpy(&bits, obj + offset, 4); } __except (EXCEPTION_EXECUTE_HANDLER) { bits = 0xDEADDEAD; }
+        std::memcpy(&fv, &bits, 4);
+        VRLOG("[objects]  %p (%s) +0x%X = %.4f [0x%08X]", static_cast<const void*>(obj), where(obj), offset, fv, bits);
+    }
+    VRLOG("[objects] %zu objects with vtable %08X", g_cands.size(), vtable);
 }
 
 bool read_float(const float* p, float& out)
@@ -263,7 +331,8 @@ int      g_h2_phase = -1;     // -1 idle, 0 press, 1 wait, 2 scan, 3 release, 4 
 int      g_h2_wait = 0;
 float    g_h2_th0 = 0.0f, g_h2_tv0 = 0.0f, g_h2_th1 = 0.0f, g_h2_tv1 = 0.0f;
 constexpr int kH2Settle = 75;
-constexpr size_t kH2PerSet = 40000;
+constexpr size_t kH2Max = 1500000;   // compact candidates across all encodings
+int g_h2_taps = 0;
 
 // Encodings of a pair of tangents, same order as g_hunt_sets (minus ini literals).
 struct Enc { const char* name; float factor; };
@@ -352,14 +421,43 @@ void hunt_begin(float factor, bool deg_v_only = false)
 void hunt2_begin(float factor)
 {
     float th, tv;
-    if (!camover::world_tangents(th, tv)) { VRLOG("[hunt2] no world projection yet"); return; }
+    if (!hunt_tangents(th, tv)) { VRLOG("[hunt2] no %s projection yet", g_hunt_weapon ? "weapon" : "world"); return; }
     if (g_hunt_phase >= 0) { VRLOG("[hunt2] a hunt is already running"); return; }
     g_hunt_factor = factor;
     g_hunt_sets.clear();
     for (size_t i = 0; i < kEncCount; ++i) g_hunt_sets.push_back({ kEnc[i].name, 0.0f, kEnc[i].factor });
     g_hunt.clear(); g_hits.clear();
-    g_h2_phase = 0; g_h2_wait = 0;
-    VRLOG("[hunt2] starting: two-state (ADS) hunt, factor %.2f", factor);
+    g_h2_phase = 0; g_h2_wait = 0; g_h2_taps = 0;
+    VRLOG("[hunt2] starting: two-state (ADS toggle) hunt on the %s projection, factor %.2f", g_hunt_weapon ? "WEAPON" : "world", factor);
+}
+
+void tap_rmb() { send_mouse_button(true, true); send_mouse_button(true, false); }
+
+// One sweep, all encodings: a float matching encoding i of (th, tv) within
+// 0.1% is recorded as {addr, i}. Much faster than 12 sweeps, and the tight
+// tolerance keeps the list small enough to keep everything.
+void scan_all_encodings(float th, float tv)
+{
+    float want[kEncCount], eps[kEncCount];
+    for (size_t i = 0; i < kEncCount; ++i) { want[i] = encode(i, th, tv); eps[i] = std::fabs(want[i]) * 0.001f + 1e-6f; }
+    g_hunt.clear();
+    if (g_hunt.capacity() < kH2Max) g_hunt.reserve(kH2Max);
+    g_excl_n = 0;
+    exclude_vector(g_cands);
+    exclude_vector(g_hunt);
+    for_each_region([&](const char* base, size_t size) {
+        __try {
+            const float* f = reinterpret_cast<const float*>(base);
+            const size_t cnt = size / 4;
+            for (size_t k = 0; k < cnt && g_hunt.size() < kH2Max; ++k) {
+                const float v = f[k];
+                if (!(v > 1e-4f && v < 1e4f)) continue;
+                for (size_t i = 0; i < kEncCount; ++i) {
+                    if (std::fabs(v - want[i]) <= eps[i]) { g_hunt.push_back({ const_cast<float*>(f + k), v, static_cast<int>(i) }); break; }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    });
 }
 
 void hunt2_tick()
@@ -367,16 +465,14 @@ void hunt2_tick()
     if (g_h2_phase < 0) return;
     switch (g_h2_phase) {
     case 0: {
-        camover::world_tangents(g_h2_th0, g_h2_tv0);
-        const bool fg = focus_game();
-        if (!fg) {
-            // Never inject input into whatever else is in the foreground.
+        hunt_tangents(g_h2_th0, g_h2_tv0);
+        if (!focus_game()) {
             VRLOG("[hunt2] ABORT: could not bring the game window to the foreground; click the game window and rerun hunt2");
             g_h2_phase = -1;
             return;
         }
-        VRLOG("[hunt2] T0 tangents %.4f/%.4f; game focused; pressing RMB (aim down sights)", g_h2_th0, g_h2_tv0);
-        send_mouse_button(true, true);
+        VRLOG("[hunt2] T0 %s tangents %.4f/%.4f; game focused; tapping RMB (zoom toggle)", g_hunt_weapon ? "weapon" : "world", g_h2_th0, g_h2_tv0);
+        tap_rmb(); g_h2_taps = 1;
         g_h2_phase = 1; g_h2_wait = 0;
         return;
     }
@@ -385,35 +481,29 @@ void hunt2_tick()
         g_h2_phase = 2;
         return;
     case 2: {
-        camover::world_tangents(g_h2_th1, g_h2_tv1);
+        hunt_tangents(g_h2_th1, g_h2_tv1);
         const bool moved = std::fabs(g_h2_th1 / g_h2_th0 - 1.0f) > 0.03f || std::fabs(g_h2_tv1 / g_h2_tv0 - 1.0f) > 0.03f;
         if (!moved) {
-            send_mouse_button(true, false);
-            VRLOG("[hunt2] ABORT: tangents did not change under RMB (%.4f/%.4f). Weapon without ADS, game not focused, or paused.", g_h2_th1, g_h2_tv1);
+            if (g_h2_taps < 3) {   // maybe the first tap un-zoomed a stale zoom; try once more
+                VRLOG("[hunt2] no change after tap %d (%.4f/%.4f); tapping again", g_h2_taps, g_h2_th1, g_h2_tv1);
+                tap_rmb(); ++g_h2_taps; g_h2_phase = 1; g_h2_wait = 0;
+                return;
+            }
+            VRLOG("[hunt2] ABORT: %s tangents did not change under zoom (%.4f/%.4f)", g_hunt_weapon ? "weapon" : "world", g_h2_th1, g_h2_tv1);
             g_h2_phase = -1;
             return;
         }
-        VRLOG("[hunt2] T1 (zoomed) tangents %.4f/%.4f - scanning %zu encodings...", g_h2_th1, g_h2_tv1, kEncCount);
-        for (size_t i = 0; i < kEncCount; ++i) {
-            const float v = encode(i, g_h2_th1, g_h2_tv1);
-            const float eps = std::fabs(v) * 0.003f + 1e-5f;
-            scan_range(v - eps, v + eps);
-            size_t added = 0;
-            for (const Candidate& c : g_cands) {
-                if (added >= kH2PerSet) break;
-                g_hunt.push_back({ c.addr, c.original, static_cast<int>(i) });
-                ++added;
-            }
-            g_hunt_sets[i].value = v;
-            VRLOG("[hunt2]  %-10s zoomed=%10.4f: %zu matches (%zu kept)", kEnc[i].name, v, g_cands.size(), added);
-        }
-        g_cands.clear();
+        VRLOG("[hunt2] T1 (zoomed) %.4f/%.4f - one-pass scan of %zu encodings at 0.1%%...", g_h2_th1, g_h2_tv1, kEncCount);
+        scan_all_encodings(g_h2_th1, g_h2_tv1);
+        size_t per[kEncCount] = {};
+        for (const HuntCand& c : g_hunt) ++per[c.set];
+        for (size_t i = 0; i < kEncCount; ++i) if (per[i]) VRLOG("[hunt2]  %-10s zoomed=%10.4f: %zu", kEnc[i].name, encode(i, g_h2_th1, g_h2_tv1), per[i]);
+        VRLOG("[hunt2] %zu candidates%s; tapping RMB to un-zoom", g_hunt.size(), g_hunt.size() >= kH2Max ? " (CAPPED)" : "");
         g_h2_phase = 3;
         return;
     }
     case 3:
-        send_mouse_button(true, false);
-        VRLOG("[hunt2] released RMB; settling");
+        tap_rmb();
         g_h2_phase = 4; g_h2_wait = 0;
         return;
     case 4:
@@ -422,24 +512,32 @@ void hunt2_tick()
         return;
     case 5: {
         float th2, tv2;
-        camover::world_tangents(th2, tv2);
-        VRLOG("[hunt2] T2 (released) tangents %.4f/%.4f; refining to addresses that followed the zoom back", th2, tv2);
+        hunt_tangents(th2, tv2);
+        const bool back = std::fabs(th2 / g_h2_th0 - 1.0f) < 0.03f && std::fabs(tv2 / g_h2_tv0 - 1.0f) < 0.03f;
+        if (!back) {
+            VRLOG("[hunt2] not back to T0 after un-zoom tap (%.4f/%.4f vs %.4f/%.4f); tapping again", th2, tv2, g_h2_th0, g_h2_tv0);
+            tap_rmb(); g_h2_phase = 4; g_h2_wait = 0;
+            if (++g_h2_taps > 6) { VRLOG("[hunt2] ABORT: cannot restore the un-zoomed state"); g_h2_phase = -1; }
+            return;
+        }
+        VRLOG("[hunt2] T2 (released) %.4f/%.4f; keeping addresses that followed the zoom back", th2, tv2);
         std::vector<HuntCand> kept;
         size_t per_set[kEncCount] = {};
         for (const HuntCand& c : g_hunt) {
             float now;
             if (!read_float(c.addr, now)) continue;
             const float want = encode(static_cast<size_t>(c.set), th2, tv2);
-            if (std::fabs(now - want) <= std::fabs(want) * 0.005f + 1e-5f &&
-                std::fabs(now - c.original) > std::fabs(want) * 0.01f) {   // it actually changed
+            if (std::fabs(now - want) <= std::fabs(want) * 0.001f + 1e-6f &&
+                std::fabs(now - c.original) > std::fabs(want) * 0.01f) {
                 kept.push_back({ c.addr, now, c.set });
                 ++per_set[c.set];
             }
         }
         g_hunt.swap(kept);
         for (size_t i = 0; i < kEncCount; ++i) if (per_set[i]) VRLOG("[hunt2]  %-10s: %zu two-state matches", kEnc[i].name, per_set[i]);
-        for (size_t i = 0; i < g_hunt.size() && i < 40; ++i)
+        for (size_t i = 0; i < g_hunt.size() && i < 60; ++i)
             VRLOG("[hunt2]  cand %zu: %p (%s) set=%s value=%.4f", i, g_hunt[i].addr, where(g_hunt[i].addr), kEnc[g_hunt[i].set].name, g_hunt[i].original);
+        if (g_hunt.size() > 3000) { VRLOG("[hunt2] %zu survivors - verifying the first 3000", g_hunt.size()); g_hunt.resize(3000); }
         VRLOG("[hunt2] %zu survivors -> poke-verify (factor %.2f)", g_hunt.size(), g_hunt_factor);
         g_h2_phase = -1;
         g_hunt_i = 0; g_hunt_phase = 0; g_hunt_frames_total = 0;
@@ -620,7 +718,7 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         // Words whose VALUE (as a 32-bit integer) lies in [lo, hi]: pointer scan.
         if (!has2) { _snprintf_s(reply, n, _TRUNCATE, "usage: scanptr <hexlo> <hexhi>"); return true; }
         const unsigned lo = static_cast<unsigned>(strtoul(a1, nullptr, 16)), hi = static_cast<unsigned>(strtoul(a2, nullptr, 16));
-        g_cands.clear();
+        prepare_scan();
         for_each_region([&](const char* base, size_t size) {
             __try {
                 const unsigned* w = reinterpret_cast<const unsigned*>(base);
@@ -635,6 +733,14 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         size_t in_exe = 0;
         for (const Candidate& c : g_cands) if (!strcmp(where(c.addr), "exe")) ++in_exe;
         _snprintf_s(reply, n, _TRUNCATE, "scanptr: %zu words point into [%08X, %08X], %zu of them in the exe image (list to see)", g_cands.size(), lo, hi, in_exe);
+        return true;
+    }
+    if (!strcmp(cmd, "objects")) {
+        if (!has1) { _snprintf_s(reply, n, _TRUNCATE, "usage: objects <vtable-hex> [offset-hex]"); return true; }
+        const unsigned vt = static_cast<unsigned>(strtoul(a1, nullptr, 16));
+        const unsigned off = has2 ? static_cast<unsigned>(strtoul(a2, nullptr, 16)) : 0x50u;
+        list_objects(vt, off, 64);
+        _snprintf_s(reply, n, _TRUNCATE, "objects: %zu with vtable %08X (see [objects] lines)", g_cands.size(), vt);
         return true;
     }
     if (!strcmp(cmd, "fovfind")) {
@@ -681,6 +787,8 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         return true;
     }
     if (!strcmp(cmd, "hunt2")) {
+        g_hunt_weapon = has2 && !_stricmp(a2, "weapon");
+        g_fovfind_pending = true;
         hunt2_begin(has1 ? static_cast<float>(atof(a1)) : 1.3f);
         _snprintf_s(reply, n, _TRUNCATE, "hunt2 started (watch [hunt2] lines)");
         return true;
