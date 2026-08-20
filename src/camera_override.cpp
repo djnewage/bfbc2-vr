@@ -173,7 +173,7 @@ bool  g_fov_auto    = false;
 // built per draw around the draw's OWN projection (cached per distinct P,
 // ~4 per frame); the global form is just the P' == P special case and stays
 // as the fallback for writes whose projection cannot be recovered.
-float g_vm_push   = 0.0f;    // metres forward along the body camera; 0 = none
+float g_vm_push   = 0.15f;   // metres forward along the body camera (arm's-length feel; -/= tune)
 int   g_vm_mode   = 2;       // weapon projection: 0 own P, 1 own P, 2 hybrid (world field, own depth), 3 world P
 bool  g_ownproj_on = true;   // Shift+']' toggles, for A/B against the old global-only path
 drawpolicy::Thresholds g_vm_th;
@@ -229,9 +229,12 @@ thread_local PendingWvp t_pending;
 // behind the near plane at headset FOV and slice into blades; a floating gun
 // is the VR convention and what the controller-held gun wants anyway.
 constexpr size_t kMaxHidden = 16;
-unsigned long long g_hide[kMaxHidden] = {};
-unsigned g_hide_bits[kMaxHidden] = {};   // number of hex digits given (prefix match)
-size_t g_hide_n = 0;
+// Default: the first-person ARMS + gloves shader (FNV-1a of its bytecode,
+// stable across launches; found by elimination with eye shots 2026-08-20).
+// The gun body (2906751e...) and its parts stay.
+unsigned long long g_hide[kMaxHidden] = { 0x76fbfb1ef6146ed9ull };
+unsigned g_hide_bits[kMaxHidden] = { 16 };   // number of hex digits given (prefix match)
+size_t g_hide_n = 1;
 unsigned g_hidden_draws = 0, g_hidden_draws_last = 0;
 
 bool hash_hidden(unsigned long long h)
