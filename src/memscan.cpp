@@ -13,7 +13,7 @@ namespace memscan {
 namespace {
 
 constexpr float kPi = 3.14159265358979f;
-constexpr size_t kMaxCandidates = 200000;
+constexpr size_t kMaxCandidates = 2000000;
 
 struct Candidate { float* addr; float original; };
 std::vector<Candidate> g_cands;      // current candidate list (scan / refine)
@@ -137,6 +137,61 @@ struct Lock { float* addr; float value; };
 std::vector<Lock> g_locks;
 std::vector<float*> g_watches;
 
+// ---- game window + synthetic input (for autonomous state changes) ----
+HWND g_game_hwnd = nullptr;
+
+BOOL CALLBACK find_game_window(HWND h, LPARAM)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || GetWindow(h, GW_OWNER)) return TRUE;
+    RECT r = {};
+    GetWindowRect(h, &r);
+    if (r.right - r.left < 200 || r.bottom - r.top < 200) return TRUE;
+    g_game_hwnd = h;
+    return FALSE;
+}
+
+HWND game_window()
+{
+    if (!g_game_hwnd || !IsWindow(g_game_hwnd)) { g_game_hwnd = nullptr; EnumWindows(find_game_window, 0); }
+    return g_game_hwnd;
+}
+
+bool focus_game()
+{
+    HWND h = game_window();
+    if (!h) return false;
+    if (GetForegroundWindow() == h) return true;
+    const DWORD fg_thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    const DWORD me = GetCurrentThreadId();
+    if (fg_thread && fg_thread != me) AttachThreadInput(me, fg_thread, TRUE);
+    AllowSetForegroundWindow(ASFW_ANY);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+    SetActiveWindow(h);
+    if (fg_thread && fg_thread != me) AttachThreadInput(me, fg_thread, FALSE);
+    return GetForegroundWindow() == h;
+}
+
+void send_mouse_button(bool right, bool down)
+{
+    INPUT in = {};
+    in.type = INPUT_MOUSE;
+    in.mi.dwFlags = right ? (down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP)
+                          : (down ? MOUSEEVENTF_LEFTDOWN  : MOUSEEVENTF_LEFTUP);
+    SendInput(1, &in, sizeof(in));
+}
+
+void send_key(WORD vk, bool down)
+{
+    INPUT in = {};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+    in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+    SendInput(1, &in, sizeof(in));
+}
+
 // ---- FOV hunt ----
 struct HuntSet { const char* name; float value; float factor; };   // factor applied to the ORIGINAL when poking
 struct HuntCand { float* addr; float original; int set; };
@@ -152,6 +207,37 @@ float    g_base_th = 0.0f, g_base_tv = 0.0f;
 unsigned g_hunt_frames_total = 0;
 constexpr int kHuntWait = 3;
 constexpr size_t kHuntPerSet = 160;
+
+// Two-state hunt: the engine zooms when aiming down sights; we press RMB
+// ourselves, scan for every encoding of the ZOOMED tangents, release, and
+// keep only addresses that return to the encoding of the UN-ZOOMED tangents.
+// Survivors are then poke-verified like hunt v1.
+int      g_h2_phase = -1;     // -1 idle, 0 press, 1 wait, 2 scan, 3 release, 4 wait, 5 refine
+int      g_h2_wait = 0;
+float    g_h2_th0 = 0.0f, g_h2_tv0 = 0.0f, g_h2_th1 = 0.0f, g_h2_tv1 = 0.0f;
+constexpr int kH2Settle = 75;
+constexpr size_t kH2PerSet = 40000;
+
+// Encodings of a pair of tangents, same order as g_hunt_sets (minus ini literals).
+struct Enc { const char* name; float factor; };
+constexpr Enc kEnc[] = {
+    { "deg_v", 1.3f }, { "deg_h", 1.3f }, { "halfdeg_v", 1.3f }, { "halfdeg_h", 1.3f },
+    { "rad_v", 1.3f }, { "rad_h", 1.3f }, { "halfrad_v", 1.3f }, { "halfrad_h", 1.3f },
+    { "tan_v", 1.3f }, { "tan_h", 1.3f }, { "proj_b", 1.0f / 1.3f }, { "proj_a", 1.0f / 1.3f },
+};
+constexpr size_t kEncCount = sizeof(kEnc) / sizeof(kEnc[0]);
+
+float encode(size_t i, float th, float tv)
+{
+    const float deg_h = 2.0f * std::atan(th) * 180.0f / kPi, deg_v = 2.0f * std::atan(tv) * 180.0f / kPi;
+    switch (i) {
+    case 0: return deg_v;  case 1: return deg_h;  case 2: return deg_v * 0.5f; case 3: return deg_h * 0.5f;
+    case 4: return deg_v * kPi / 180.0f; case 5: return deg_h * kPi / 180.0f;
+    case 6: return deg_v * kPi / 360.0f; case 7: return deg_h * kPi / 360.0f;
+    case 8: return tv; case 9: return th; case 10: return 1.0f / tv; case 11: return 1.0f / th;
+    }
+    return 0.0f;
+}
 
 void hunt_begin(float factor)
 {
@@ -199,6 +285,99 @@ void hunt_begin(float factor)
     g_hunt_frames_total = 0;
     VRLOG("[hunt] %zu candidates; poking each for %d frames (~%.0f s at 60 fps). Results as [hunt] HIT lines.",
           g_hunt.size(), kHuntWait + 2, g_hunt.size() * (kHuntWait + 2) / 60.0f);
+}
+
+void hunt2_begin(float factor)
+{
+    float th, tv;
+    if (!camover::world_tangents(th, tv)) { VRLOG("[hunt2] no world projection yet"); return; }
+    if (g_hunt_phase >= 0) { VRLOG("[hunt2] a hunt is already running"); return; }
+    g_hunt_factor = factor;
+    g_hunt_sets.clear();
+    for (size_t i = 0; i < kEncCount; ++i) g_hunt_sets.push_back({ kEnc[i].name, 0.0f, kEnc[i].factor });
+    g_hunt.clear(); g_hits.clear();
+    g_h2_phase = 0; g_h2_wait = 0;
+    VRLOG("[hunt2] starting: two-state (ADS) hunt, factor %.2f", factor);
+}
+
+void hunt2_tick()
+{
+    if (g_h2_phase < 0) return;
+    switch (g_h2_phase) {
+    case 0: {
+        camover::world_tangents(g_h2_th0, g_h2_tv0);
+        const bool fg = focus_game();
+        VRLOG("[hunt2] T0 tangents %.4f/%.4f; focus %s; pressing RMB (aim down sights)", g_h2_th0, g_h2_tv0, fg ? "ok" : "FAILED (input may not reach the game)");
+        send_mouse_button(true, true);
+        g_h2_phase = 1; g_h2_wait = 0;
+        return;
+    }
+    case 1:
+        if (++g_h2_wait < kH2Settle) return;
+        g_h2_phase = 2;
+        return;
+    case 2: {
+        camover::world_tangents(g_h2_th1, g_h2_tv1);
+        const bool moved = std::fabs(g_h2_th1 / g_h2_th0 - 1.0f) > 0.03f || std::fabs(g_h2_tv1 / g_h2_tv0 - 1.0f) > 0.03f;
+        if (!moved) {
+            send_mouse_button(true, false);
+            VRLOG("[hunt2] ABORT: tangents did not change under RMB (%.4f/%.4f). Weapon without ADS, game not focused, or paused.", g_h2_th1, g_h2_tv1);
+            g_h2_phase = -1;
+            return;
+        }
+        VRLOG("[hunt2] T1 (zoomed) tangents %.4f/%.4f - scanning %zu encodings...", g_h2_th1, g_h2_tv1, kEncCount);
+        for (size_t i = 0; i < kEncCount; ++i) {
+            const float v = encode(i, g_h2_th1, g_h2_tv1);
+            const float eps = std::fabs(v) * 0.003f + 1e-5f;
+            scan_range(v - eps, v + eps);
+            size_t added = 0;
+            for (const Candidate& c : g_cands) {
+                if (added >= kH2PerSet) break;
+                g_hunt.push_back({ c.addr, c.original, static_cast<int>(i) });
+                ++added;
+            }
+            g_hunt_sets[i].value = v;
+            VRLOG("[hunt2]  %-10s zoomed=%10.4f: %zu matches (%zu kept)", kEnc[i].name, v, g_cands.size(), added);
+        }
+        g_cands.clear();
+        g_h2_phase = 3;
+        return;
+    }
+    case 3:
+        send_mouse_button(true, false);
+        VRLOG("[hunt2] released RMB; settling");
+        g_h2_phase = 4; g_h2_wait = 0;
+        return;
+    case 4:
+        if (++g_h2_wait < kH2Settle) return;
+        g_h2_phase = 5;
+        return;
+    case 5: {
+        float th2, tv2;
+        camover::world_tangents(th2, tv2);
+        VRLOG("[hunt2] T2 (released) tangents %.4f/%.4f; refining to addresses that followed the zoom back", th2, tv2);
+        std::vector<HuntCand> kept;
+        size_t per_set[kEncCount] = {};
+        for (const HuntCand& c : g_hunt) {
+            float now;
+            if (!read_float(c.addr, now)) continue;
+            const float want = encode(static_cast<size_t>(c.set), th2, tv2);
+            if (std::fabs(now - want) <= std::fabs(want) * 0.005f + 1e-5f &&
+                std::fabs(now - c.original) > std::fabs(want) * 0.01f) {   // it actually changed
+                kept.push_back({ c.addr, now, c.set });
+                ++per_set[c.set];
+            }
+        }
+        g_hunt.swap(kept);
+        for (size_t i = 0; i < kEncCount; ++i) if (per_set[i]) VRLOG("[hunt2]  %-10s: %zu two-state matches", kEnc[i].name, per_set[i]);
+        for (size_t i = 0; i < g_hunt.size() && i < 40; ++i)
+            VRLOG("[hunt2]  cand %zu: %p (%s) set=%s value=%.4f", i, g_hunt[i].addr, where(g_hunt[i].addr), kEnc[g_hunt[i].set].name, g_hunt[i].original);
+        VRLOG("[hunt2] %zu survivors -> poke-verify (factor %.2f)", g_hunt.size(), g_hunt_factor);
+        g_h2_phase = -1;
+        g_hunt_i = 0; g_hunt_phase = 0; g_hunt_frames_total = 0;
+        return;
+    }
+    }
 }
 
 void hunt_tick()
@@ -334,6 +513,37 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
                     idx, h.addr, g_hunt_sets[h.set].name, g_locks.back().value, h.original);
         return true;
     }
+    if (!strcmp(cmd, "hunt2")) {
+        hunt2_begin(has1 ? static_cast<float>(atof(a1)) : 1.3f);
+        _snprintf_s(reply, n, _TRUNCATE, "hunt2 started (watch [hunt2] lines)");
+        return true;
+    }
+    if (!strcmp(cmd, "focus")) {
+        const bool ok = focus_game();
+        _snprintf_s(reply, n, _TRUNCATE, "focus: hwnd=%p %s", static_cast<void*>(game_window()), ok ? "foreground" : "NOT foreground");
+        return true;
+    }
+    if (!strcmp(cmd, "rmb") || !strcmp(cmd, "lmb")) {
+        const bool down = has1 && !_stricmp(a1, "down");
+        focus_game();
+        send_mouse_button(cmd[0] == 'r', down);
+        _snprintf_s(reply, n, _TRUNCATE, "%s %s", cmd, down ? "down" : "up");
+        return true;
+    }
+    if (!strcmp(cmd, "key")) {
+        if (!has1) { _snprintf_s(reply, n, _TRUNCATE, "usage: key <vk-hex> down|up|tap"); return true; }
+        const WORD vk = static_cast<WORD>(strtoul(a1, nullptr, 16));
+        focus_game();
+        if (!has2 || !_stricmp(a2, "tap")) { send_key(vk, true); send_key(vk, false); }
+        else send_key(vk, !_stricmp(a2, "down"));
+        _snprintf_s(reply, n, _TRUNCATE, "key 0x%02X %s", vk, has2 ? a2 : "tap");
+        return true;
+    }
+    if (!strcmp(cmd, "huntstop")) {
+        g_hunt_phase = -1; g_h2_phase = -1;
+        _snprintf_s(reply, n, _TRUNCATE, "hunts stopped (%zu hits kept)", g_hits.size());
+        return true;
+    }
     if (!strcmp(cmd, "hunthits")) {
         for (size_t i = 0; i < g_hits.size(); ++i) {
             const HuntHit& h = g_hits[i];
@@ -348,6 +558,7 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
 
 void on_present()
 {
+    hunt2_tick();
     hunt_tick();
     for (const Lock& l : g_locks) write_float(l.addr, l.value);
 }
@@ -357,6 +568,7 @@ void status(FILE* f)
     fprintf(f, "scan: %zu candidates; locks=%zu; watches=%zu; hunt=%s (%zu/%zu, %zu hits)\n",
             g_cands.size(), g_locks.size(), g_watches.size(),
             g_hunt_phase >= 0 ? "RUNNING" : "idle", g_hunt_i, g_hunt.size(), g_hits.size());
+    fprintf(f, "hunt2: %s\n", g_h2_phase < 0 ? "idle" : "RUNNING");
     for (float* w : g_watches) {
         float v; const bool ok = read_float(w, v);
         fprintf(f, "watch %p (%s) = %.6f%s\n", static_cast<void*>(w), where(w), ok ? v : 0.0f, ok ? "" : " (unreadable)");

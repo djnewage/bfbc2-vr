@@ -59,6 +59,9 @@ void on_present()
     static unsigned frame = 0;
     ++frame;
 
+    // Every frame: hunt state machines, locks, watches.
+    memscan::on_present();
+
     if (frame % 10 == 0) {
         // Read-and-truncate the command file. Opening for read+write in one
         // go would race a writer mid-line; read fully, then truncate.
