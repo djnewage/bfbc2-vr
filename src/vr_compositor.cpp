@@ -7,6 +7,9 @@
 #include <openvr.h>
 #include <d3d9_interfaces.h>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <algorithm>
 
 namespace vrcomp {
 namespace {
@@ -27,6 +30,21 @@ VkQueue          g_vk_queue    = VK_NULL_HANDLE;
 uint32_t         g_vk_queue_family = 0;
 
 UINT g_width = 0, g_height = 0;
+
+// HUD overlay state. Two textures: the one being drawn this frame and the one
+// the compositor is still reading from last frame.
+IDirect3DTexture9*     g_hud_tex[2]     = {};
+ID3D9VkInteropTexture* g_hud_interop[2] = {};
+int      g_hud_cur = 0;
+vr::VROverlayHandle_t g_hud_handle = vr::k_ulOverlayHandleInvalid;
+bool     g_hud_enabled = true;
+float    g_hud_dist = 1.5f;     // metres in front of the body direction
+float    g_hud_width = 1.6f;    // metres; height follows the texture aspect
+bool     g_hud_redirected = false;
+IDirect3DSurface9* g_hud_saved_rt = nullptr;
+unsigned g_hud_draws = 0, g_hud_draws_last = 0;
+bool     g_hud_failed = false;
+unsigned g_hud_submits = 0;
 bool g_scene_ok   = false;   // compositor interface acquired
 bool g_interop_ok = false;
 bool g_enabled    = true;    // F4 kill switch - keeps the game playable if VR path hangs
@@ -92,6 +110,76 @@ bool init_eye_texture()
     }
     VRLOG("[comp] eye textures ready (2x %ux%u)", g_width, g_height);
     return true;
+}
+
+bool init_hud()
+{
+    if (g_hud_failed || !g_hud_enabled) return false;
+    if (g_hud_tex[0] && g_hud_tex[1] && g_hud_handle != vr::k_ulOverlayHandleInvalid) return true;
+    if (!g_device || !g_width || !vr::VROverlay()) return false;
+
+    for (int i = 0; i < 2; ++i) {
+        if (g_hud_tex[i]) continue;
+        if (FAILED(g_device->CreateTexture(g_width, g_height, 1, D3DUSAGE_RENDERTARGET,
+                                           D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_hud_tex[i], nullptr))) {
+            VRLOG("[hud] texture %d creation failed", i); g_hud_failed = true; return false;
+        }
+        if (FAILED(g_hud_tex[i]->QueryInterface(__uuidof(ID3D9VkInteropTexture),
+                                                reinterpret_cast<void**>(&g_hud_interop[i])))) {
+            VRLOG("[hud] texture %d has no interop", i); g_hud_failed = true; return false;
+        }
+        IDirect3DSurface9* surf = nullptr;
+        if (SUCCEEDED(g_hud_tex[i]->GetSurfaceLevel(0, &surf)) && surf) {
+            g_device->ColorFill(surf, nullptr, D3DCOLOR_ARGB(0, 0, 0, 0));
+            surf->Release();
+        }
+    }
+    if (g_hud_handle == vr::k_ulOverlayHandleInvalid) {
+        const auto err = vr::VROverlay()->CreateOverlay("bfbc2vr.hud", "BFBC2 VR HUD", &g_hud_handle);
+        if (err != vr::VROverlayError_None) {
+            VRLOG("[hud] CreateOverlay failed: %d", (int)err); g_hud_failed = true; return false;
+        }
+        vr::VROverlay()->SetOverlayWidthInMeters(g_hud_handle, g_hud_width);
+        vr::VROverlay()->SetOverlayAlpha(g_hud_handle, 1.0f);
+        vr::VROverlay()->SetOverlayInputMethod(g_hud_handle, vr::VROverlayInputMethod_None);
+        vr::VROverlay()->ShowOverlay(g_hud_handle);
+        VRLOG("[hud] overlay created (%ux%u, %.2f m wide at %.2f m)", g_width, g_height, g_hud_width, g_hud_dist);
+    }
+    return true;
+}
+
+void release_hud_textures()
+{
+    hud_end_draw();
+    for (int i = 0; i < 2; ++i) {
+        if (g_hud_interop[i]) { g_hud_interop[i]->Release(); g_hud_interop[i] = nullptr; }
+        if (g_hud_tex[i])     { g_hud_tex[i]->Release();     g_hud_tex[i] = nullptr; }
+    }
+}
+
+// Overlay pose: in front of the BODY direction (the HMD reference captured at
+// recenter), in the standing tracking space. Yaw/pitch are in the convention
+// of camover::hmd_yaw_pitch (yaw 0 = -Z, positive toward -X; pitch up positive).
+void update_hud_transform()
+{
+    float yaw = 0.0f, pitch = 0.0f, pos[3] = {};
+    if (!camover::body_frame(yaw, pitch, pos)) return;
+    const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
+    // forward in OpenVR space
+    const float f[3] = { sy * cp, sp, -cy * cp };
+    // overlay local +Z faces the viewer: z = -f; x = up x z; y = z x x
+    float z[3] = { -f[0], -f[1], -f[2] };
+    const float up[3] = { 0.0f, 1.0f, 0.0f };
+    float x[3] = { up[1]*z[2] - up[2]*z[1], up[2]*z[0] - up[0]*z[2], up[0]*z[1] - up[1]*z[0] };
+    const float xl = std::sqrt(x[0]*x[0] + x[1]*x[1] + x[2]*x[2]);
+    if (xl < 1e-4f) { x[0] = 1.0f; x[1] = 0.0f; x[2] = 0.0f; } else { x[0] /= xl; x[1] /= xl; x[2] /= xl; }
+    const float y[3] = { z[1]*x[2] - z[2]*x[1], z[2]*x[0] - z[0]*x[2], z[0]*x[1] - z[1]*x[0] };
+    vr::HmdMatrix34_t m = {};
+    for (int r = 0; r < 3; ++r) {
+        m.m[r][0] = x[r]; m.m[r][1] = y[r]; m.m[r][2] = z[r];
+        m.m[r][3] = pos[r] + f[r] * g_hud_dist;
+    }
+    vr::VROverlay()->SetOverlayTransformAbsolute(g_hud_handle, vr::TrackingUniverseStanding, &m);
 }
 
 // Steam's F12 screenshot crashes the game in a VR scene session (overlay GPU
@@ -182,6 +270,7 @@ void on_device_created(IDirect3DDevice9* real_device)
 
 void on_reset_begin()
 {
+    release_hud_textures();
     for (int e = 0; e < 2; ++e) {
         if (g_eye_interop[e]) { g_eye_interop[e]->Release(); g_eye_interop[e] = nullptr; }
         if (g_eye_tex[e])     { g_eye_tex[e]->Release();     g_eye_tex[e] = nullptr; }
@@ -209,6 +298,8 @@ bool submit_frame()
         if (now && !down && g_device) save_eye_bmps();
         down = now;
     }
+
+    hud_end_draw();   // whatever the game left redirected, the frame is over
 
     if (!g_device || !g_enabled) return false;
     if (!init_compositor() || !init_interop_device()) return false;
@@ -319,11 +410,19 @@ bool submit_frame()
     range.levelCount = 1;
     range.layerCount = 1;
 
+    // HUD overlay image for this frame (the buffer the HUD was drawn into).
+    const bool hud_ok = init_hud() && camover::stereo_active();
+    VkImage hud_image = VK_NULL_HANDLE; VkImageLayout hud_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageCreateInfo hud_info = {}; hud_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    const int hud_buf = g_hud_cur;
+    if (hud_ok && FAILED(g_hud_interop[hud_buf]->GetVulkanImageInfo(&hud_image, &hud_layout, &hud_info))) hud_image = VK_NULL_HANDLE;
+
     stage("transition to TRANSFER_SRC");
     for (int e = 0; e < 2; ++e) {
         g_interop_dev->TransitionTextureLayout(g_eye_interop[e], &range, layout[e],
                                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     }
+    if (hud_image) g_interop_dev->TransitionTextureLayout(g_hud_interop[hud_buf], &range, hud_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     stage("FlushRenderingCommands");
     g_interop_dev->FlushRenderingCommands();
 
@@ -393,10 +492,45 @@ bool submit_frame()
     const auto err_l = vr::VRCompositor()->Submit(vr::Eye_Left,  tex_l, have_bounds ? &bounds[0] : nullptr);
     stage("Submit R");
     const auto err_r = vr::VRCompositor()->Submit(vr::Eye_Right, tex_r, have_bounds ? &bounds[1] : nullptr);
+    if (hud_image) {
+        vr::VRVulkanTextureData_t hv = {};
+        hv.m_nImage = static_cast<uint64_t>(hud_image);
+        hv.m_pDevice = reinterpret_cast<VkDevice_T*>(g_vk_device);
+        hv.m_pPhysicalDevice = reinterpret_cast<VkPhysicalDevice_T*>(g_vk_physdev);
+        hv.m_pInstance = reinterpret_cast<VkInstance_T*>(g_vk_instance);
+        hv.m_pQueue = reinterpret_cast<VkQueue_T*>(g_vk_queue);
+        hv.m_nQueueFamilyIndex = g_vk_queue_family;
+        hv.m_nWidth = g_width; hv.m_nHeight = g_height;
+        hv.m_nFormat = static_cast<uint32_t>(hud_info.format);
+        hv.m_nSampleCount = 1;
+        vr::Texture_t ht = {}; ht.handle = &hv; ht.eType = vr::TextureType_Vulkan; ht.eColorSpace = vr::ColorSpace_Auto;
+        stage("SetOverlayTexture");
+        const auto herr = vr::VROverlay()->SetOverlayTexture(g_hud_handle, &ht);
+        if (herr != vr::VROverlayError_None) {
+            static unsigned logged = 0;
+            if (logged++ < 3) VRLOG("[hud] SetOverlayTexture failed: %d", (int)herr);
+        } else {
+            ++g_hud_submits;
+        }
+    }
     stage("ReleaseSubmissionQueue");
     g_interop_dev->ReleaseSubmissionQueue();
 
     stage("transition back");
+    if (hud_image) {
+        g_interop_dev->TransitionTextureLayout(g_hud_interop[hud_buf], &range, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, hud_layout);
+        // Flip: next frame draws into the other buffer, cleared to transparent.
+        g_hud_cur ^= 1;
+        IDirect3DSurface9* surf = nullptr;
+        if (SUCCEEDED(g_hud_tex[g_hud_cur]->GetSurfaceLevel(0, &surf)) && surf) {
+            g_device->ColorFill(surf, nullptr, D3DCOLOR_ARGB(0, 0, 0, 0));
+            surf->Release();
+        }
+        update_hud_transform();
+        vr::VROverlay()->SetOverlayWidthInMeters(g_hud_handle, g_hud_width);
+        if (g_hud_enabled) vr::VROverlay()->ShowOverlay(g_hud_handle); else vr::VROverlay()->HideOverlay(g_hud_handle);
+    }
+    g_hud_draws_last = g_hud_draws; g_hud_draws = 0;
     for (int e = 0; e < 2; ++e) {
         g_interop_dev->TransitionTextureLayout(g_eye_interop[e], &range,
                                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layout[e]);
@@ -431,12 +565,76 @@ bool active() { return g_scene_ok && g_interop_ok; }
 
 IDirect3DSurface9* backbuffer_surface() { return g_backbuffer; }
 
+void hud_begin_draw()
+{
+    if (!g_hud_enabled || g_hud_failed || !g_device) return;
+    if (!init_hud()) return;
+    ++g_hud_draws;
+    if (g_hud_redirected) return;
+    IDirect3DSurface9* cur = nullptr;
+    if (FAILED(g_device->GetRenderTarget(0, &cur)) || !cur) return;
+    IDirect3DSurface9* dst = nullptr;
+    if (FAILED(g_hud_tex[g_hud_cur]->GetSurfaceLevel(0, &dst)) || !dst) { cur->Release(); return; }
+    const HRESULT hr = g_device->SetRenderTarget(0, dst);
+    dst->Release();
+    if (FAILED(hr)) {
+        cur->Release();
+        static bool logged = false;
+        if (!logged) { logged = true; VRLOG("[hud] SetRenderTarget(HUD) failed 0x%08lX - HUD overlay disabled", hr); }
+        g_hud_failed = true;
+        return;
+    }
+    g_hud_saved_rt = cur;   // keep the reference until restore
+    g_hud_redirected = true;
+    // Alpha must ACCUMULATE coverage for the overlay: separate alpha blend
+    // ONE / INVSRCALPHA while colour keeps the game's own blend.
+    g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
+    g_device->SetRenderState(D3DRS_SRCBLENDALPHA, D3DBLEND_ONE);
+    g_device->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
+}
+
+void hud_end_draw()
+{
+    if (!g_hud_redirected) return;
+    g_hud_redirected = false;
+    if (g_device) {
+        g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+        if (g_hud_saved_rt) g_device->SetRenderTarget(0, g_hud_saved_rt);
+    }
+    if (g_hud_saved_rt) { g_hud_saved_rt->Release(); g_hud_saved_rt = nullptr; }
+}
+
+bool hud_redirected() { return g_hud_redirected; }
+
+void hud_on_game_set_render_target()
+{
+    // The game is setting its own target now; our redirect is implicitly over
+    // (the game's call will land after this). Restore the blend state only.
+    if (!g_hud_redirected) return;
+    g_hud_redirected = false;
+    if (g_device) g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+    if (g_hud_saved_rt) { g_hud_saved_rt->Release(); g_hud_saved_rt = nullptr; }
+}
+
 bool command(const char* cmd, const char*, char* reply, size_t n)
 {
     if (!strcmp(cmd, "shot")) {
         if (!g_device) { _snprintf_s(reply, n, _TRUNCATE, "shot: no device yet"); return true; }
         save_eye_bmps();
         _snprintf_s(reply, n, _TRUNCATE, "shot: eye BMPs written (bfbc2vr_eyeL/R_NN.bmp)");
+        return true;
+    }
+    if (!strcmp(cmd, "hud")) {
+        char a1[32] = {}, a2[32] = {};
+        if (args) sscanf_s(args, "%31s %31s", a1, static_cast<unsigned>(sizeof(a1)), a2, static_cast<unsigned>(sizeof(a2)));
+        if (a1[0]) {
+            if (!_stricmp(a1, "on")) { g_hud_enabled = true; g_hud_failed = false; }
+            else if (!_stricmp(a1, "off")) { g_hud_enabled = false; hud_end_draw(); if (g_hud_handle != vr::k_ulOverlayHandleInvalid && vr::VROverlay()) vr::VROverlay()->HideOverlay(g_hud_handle); }
+            else if (!_stricmp(a1, "dist") && a2[0]) g_hud_dist = (std::min)((std::max)(static_cast<float>(atof(a2)), 0.3f), 10.0f);
+            else if (!_stricmp(a1, "width") && a2[0]) g_hud_width = (std::min)((std::max)(static_cast<float>(atof(a2)), 0.2f), 10.0f);
+        }
+        _snprintf_s(reply, n, _TRUNCATE, "hud %s dist=%.2f width=%.2f draws/frame=%u submits=%u%s",
+                    g_hud_enabled ? "on" : "off", g_hud_dist, g_hud_width, g_hud_draws_last, g_hud_submits, g_hud_failed ? " FAILED" : "");
         return true;
     }
     if (!strcmp(cmd, "vr")) {
@@ -452,6 +650,8 @@ void status(FILE* f)
 {
     fprintf(f, "compositor: scene=%d interop=%d enabled=%d backbuffer=%ux%u submits=%u\n",
             g_scene_ok ? 1 : 0, g_interop_ok ? 1 : 0, g_enabled ? 1 : 0, g_width, g_height, g_submits);
+    fprintf(f, "hud: %s dist=%.2f width=%.2f draws/frame=%u submits=%u%s\n",
+            g_hud_enabled ? "on" : "off", g_hud_dist, g_hud_width, g_hud_draws_last, g_hud_submits, g_hud_failed ? " FAILED" : "");
 }
 void backbuffer_size(unsigned& w, unsigned& h) { w = g_width; h = g_height; }
 

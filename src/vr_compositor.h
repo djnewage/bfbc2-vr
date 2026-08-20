@@ -48,6 +48,15 @@ bool active();
 // off-screen passes without a GetDesc per draw.
 IDirect3DSurface9* backbuffer_surface();
 
+// HUD overlay (2026-08-20). HUD draws are redirected into a transparent
+// render target and shown as an OpenVR overlay quad in front of the BODY
+// direction (the HMD reference captured at F5 / recenter), so the crosshair
+// stays with the aim while the head looks around. The eye images carry no HUD.
+void hud_begin_draw();                 // called before a HUD draw: redirect RT
+void hud_end_draw();                   // called before a non-HUD draw / Present: restore RT
+bool hud_redirected();
+void hud_on_game_set_render_target();  // the game set its own RT: redirect is over
+
 // Command channel: "shot" saves both eye textures as BMPs (same as HOME).
 bool command(const char* cmd, const char* args, char* reply, size_t reply_size);
 void status(FILE* f);

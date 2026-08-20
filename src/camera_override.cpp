@@ -689,7 +689,7 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
     return any;
 }
 
-bool on_draw(const void* return_address, bool indexed, unsigned prim_count)
+int on_draw(const void* return_address, bool indexed, unsigned prim_count)
 {
     const shaderreg::ShaderFacts* facts = shaderreg::active_facts();
     const void* shader = shaderreg::active_shader();
@@ -698,9 +698,18 @@ bool on_draw(const void* return_address, bool indexed, unsigned prim_count)
     if (g_hide_n && facts && t_pending.valid && t_pending.shader == shader &&
         t_pending.cls == drawpolicy::DrawClass::Viewmodel && hash_hidden(facts->hash)) {
         ++g_hidden_draws;
-        return true;
+        return 1;
     }
-    if (!drawdiag::capturing()) return false;
+    // HUD: alpha-blended, depth-off draws into the backbuffer whose transform
+    // is not a perspective WVP (census: ortho/no-wvp, one call site). The
+    // scene resolve into the backbuffer has alpha blending OFF, so it stays.
+    int verdict = 0;
+    if (g_rt_is_bb && g_rs_z == 0 && g_rs_ab != 0 && g_hmd_active) {
+        const bool own_persp = t_pending.valid && t_pending.shader == shader &&
+            t_pending.pc != drawpolicy::ProjClass::NotPerspective && t_pending.pc != drawpolicy::ProjClass::NoWvp;
+        if (!own_persp) verdict = 2;
+    }
+    if (!drawdiag::capturing()) return verdict;
 
     drawdiag::Record rec;
     rec.shader = shader;
@@ -726,7 +735,15 @@ bool on_draw(const void* return_address, bool indexed, unsigned prim_count)
     rec.rt_is_backbuffer = g_rt_is_bb; rec.rt_w = g_rt_w; rec.rt_h = g_rt_h;
     rec.indexed = indexed; rec.prims = prim_count; rec.ret = return_address;
     drawdiag::on_draw(rec);
-    return false;
+    return verdict;
+}
+
+bool body_frame(float& yaw, float& pitch, float pos[3])
+{
+    if (!g_hmd_active) return false;
+    yaw = g_ref_yaw; pitch = g_ref_pitch;
+    pos[0] = g_ref_pos[0]; pos[1] = g_ref_pos[1]; pos[2] = g_ref_pos[2];
+    return true;
 }
 
 void note_render_state(unsigned state, unsigned value)
@@ -741,6 +758,7 @@ void note_render_state(unsigned state, unsigned value)
 
 void note_render_target(IDirect3DSurface9* surface)
 {
+    vrcomp::hud_on_game_set_render_target();
     IDirect3DSurface9* bb = vrcomp::backbuffer_surface();
     g_rt_is_bb = (surface != nullptr) && (surface == bb);
     if (g_rt_is_bb) {
