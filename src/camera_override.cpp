@@ -237,6 +237,10 @@ unsigned g_hide_bits[kMaxHidden] = { 16 };   // number of hex digits given (pref
 size_t g_hide_n = 1;
 unsigned g_hidden_draws = 0, g_hidden_draws_last = 0;
 
+// A frame must carry at least this many corrected 3D transform writes before
+// any draw in it can be treated as HUD (see on_draw).
+constexpr unsigned kHudMin3DWrites = 50;
+
 bool hash_hidden(unsigned long long h)
 {
     for (size_t i = 0; i < g_hide_n; ++i) {
@@ -700,11 +704,17 @@ int on_draw(const void* return_address, bool indexed, unsigned prim_count)
         ++g_hidden_draws;
         return 1;
     }
-    // HUD: alpha-blended, depth-off draws into the backbuffer whose transform
-    // is not a perspective WVP (census: ortho/no-wvp, one call site). The
-    // scene resolve into the backbuffer has alpha blending OFF, so it stays.
+    // HUD: alpha-blended, depth-off, non-perspective draws into the backbuffer
+    // AFTER the frame's 3D geometry.
+    //
+    // The "after 3D" gate is not optional (learned the hard way 2026-08-20:
+    // without it the main menu - every draw of which is alpha-blended and
+    // depth-off - went into the HUD texture and the screen went black). A
+    // frame only qualifies once it carries corrected WVP writes, and that
+    // count resets every Present, so menus and loading screens never match.
     int verdict = 0;
-    if (g_rt_is_bb && g_rs_z == 0 && g_rs_ab != 0 && g_hmd_active) {
+    if (g_rt_is_bb && g_rs_z == 0 && g_rs_ab != 0 && g_hmd_active &&
+        g_modified_this_frame > kHudMin3DWrites && g_world_proj.perspective) {
         const bool own_persp = t_pending.valid && t_pending.shader == shader &&
             t_pending.pc != drawpolicy::ProjClass::NotPerspective && t_pending.pc != drawpolicy::ProjClass::NoWvp;
         if (!own_persp) verdict = 2;
