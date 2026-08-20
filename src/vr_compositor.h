@@ -24,6 +24,8 @@
 #pragma once
 
 #include <d3d9.h>
+#include <cstdio>
+#include <cstddef>
 
 namespace vrcomp {
 
@@ -45,6 +47,10 @@ bool active();
 // Reset) and its size - lets the draw census tell backbuffer draws from
 // off-screen passes without a GetDesc per draw.
 IDirect3DSurface9* backbuffer_surface();
+
+// Command channel: "shot" saves both eye textures as BMPs (same as HOME).
+bool command(const char* cmd, const char* args, char* reply, size_t reply_size);
+void status(FILE* f);
 void backbuffer_size(unsigned& w, unsigned& h);
 
 void shutdown();

@@ -19,6 +19,8 @@ add_library(d3d9 SHARED
     src/camera_override.cpp
     src/draw_policy.cpp
     src/draw_diag.cpp
+    src/console.cpp
+    src/memscan.cpp
     src/shader_registry.cpp
     src/vr_tracking.cpp
     src/vr_compositor.cpp

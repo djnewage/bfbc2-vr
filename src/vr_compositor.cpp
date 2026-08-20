@@ -430,6 +430,29 @@ bool submit_frame()
 bool active() { return g_scene_ok && g_interop_ok; }
 
 IDirect3DSurface9* backbuffer_surface() { return g_backbuffer; }
+
+bool command(const char* cmd, const char*, char* reply, size_t n)
+{
+    if (!strcmp(cmd, "shot")) {
+        if (!g_device) { _snprintf_s(reply, n, _TRUNCATE, "shot: no device yet"); return true; }
+        save_eye_bmps();
+        _snprintf_s(reply, n, _TRUNCATE, "shot: eye BMPs written (bfbc2vr_eyeL/R_NN.bmp)");
+        return true;
+    }
+    if (!strcmp(cmd, "vr")) {
+        char a1[16] = {};
+        _snprintf_s(reply, n, _TRUNCATE, "vr submit %s", g_enabled ? "on" : "off");
+        (void)a1;
+        return true;
+    }
+    return false;
+}
+
+void status(FILE* f)
+{
+    fprintf(f, "compositor: scene=%d interop=%d enabled=%d backbuffer=%ux%u submits=%u\n",
+            g_scene_ok ? 1 : 0, g_interop_ok ? 1 : 0, g_enabled ? 1 : 0, g_width, g_height, g_submits);
+}
 void backbuffer_size(unsigned& w, unsigned& h) { w = g_width; h = g_height; }
 
 void shutdown()

@@ -9,6 +9,7 @@
 //   Present                   frame submit, retargeted to OpenXR (Phase 3)
 
 #include "wrappers.h"
+#include "console.h"
 #include <intrin.h>   // _ReturnAddress
 #include "constants.h"
 #include "camera_override.h"
@@ -122,6 +123,7 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Present(const RECT* src, const RECT
     // Frame boundary: poll the discovery hotkeys and emit periodic stats.
     vrconst::on_present();
     camover::on_present();
+    vrcmd::on_present();
     shaderreg::on_present();
     vrcomp::submit_frame();
     return m_real->Present(src, dst, wnd, dirty);
@@ -201,6 +203,7 @@ HRESULT STDMETHODCALLTYPE D3D9SwapChainWrapper::Present(const RECT* src, const R
 
     vrconst::on_present();
     camover::on_present();
+    vrcmd::on_present();
     shaderreg::on_present();
     vrcomp::submit_frame();
     return m_real->Present(src, dst, wnd, dirty, flags);

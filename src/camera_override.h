@@ -48,6 +48,8 @@
 #pragma once
 
 #include <d3d9.h>
+#include <cstdio>
+#include <cstddef>
 
 #include <vector>
 
@@ -65,6 +67,14 @@ constexpr unsigned kCamWorldBase = 189;   // c189..c192, camera-to-world
 // render-target shadows let the census key on z/alpha state and on whether
 // the draw lands in the backbuffer. All cheap no-ops unless a census is armed.
 void on_draw(const void* return_address, bool indexed, unsigned prim_count);
+
+// Command channel (console.h): widen/auto/mode/push/ownproj/bones/recenter/fov.
+// Returns true if handled; reply goes to `reply`.
+bool command(const char* cmd, const char* args, char* reply, size_t reply_size);
+// Append live state to a status file.
+void status(FILE* f);
+// The world projection's half-angle tangents recovered from VP this frame.
+bool world_tangents(float& tan_half_h, float& tan_half_v);
 void note_render_state(unsigned state, unsigned value);
 void note_render_target(IDirect3DSurface9* surface);
 

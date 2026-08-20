@@ -11,6 +11,8 @@
 
 #include <windows.h>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -719,6 +721,21 @@ void note_render_target(IDirect3DSurface9* surface)
     }
 }
 
+void recenter()
+{
+    g_angle_rad = 0.0f;
+    if (g_hmd_active) {
+        float yaw, pitch, pos[3];
+        hmd_yaw_pitch(yaw, pitch);
+        vrtrack::position(pos);
+        g_ref_yaw = yaw; g_ref_pitch = pitch;
+        std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
+        VRLOG("[vr] reference recentered (orientation + position)");
+    } else {
+        VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
+    }
+}
+
 void on_present()
 {
     static ULONGLONG last_tick = 0;
@@ -848,19 +865,7 @@ void on_present()
         g_pitch_sign = -g_pitch_sign;
         VRLOG("[vr] pitch sign -> %+0.f", g_pitch_sign);
     }
-    if (key_pressed(VK_F5)) {
-        g_angle_rad = 0.0f;
-        if (g_hmd_active) {
-            float yaw, pitch, pos[3];
-            hmd_yaw_pitch(yaw, pitch);
-            vrtrack::position(pos);
-            g_ref_yaw = yaw; g_ref_pitch = pitch;
-            std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
-            VRLOG("[vr] reference recentered (orientation + position)");
-        } else {
-            VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
-        }
-    }
+    if (key_pressed(VK_F5)) recenter();
 
     // FOV trim on top of the automatic match (PgUp wider / PgDn narrower).
     // PgDn trades field for sharpness and less edge pop-in.
@@ -946,6 +951,90 @@ void on_present()
 int  last_rendered_eye() { return (g_eye_swap > 0) ? g_last_eye : (g_last_eye ^ 1); }
 bool stereo_active()     { return g_hmd_active && g_correct_on; }
 unsigned modified_last_frame() { return g_modified_last_frame; }
+
+bool world_tangents(float& tan_half_h, float& tan_half_v)
+{
+    if (!g_world_proj.perspective) return false;
+    tan_half_h = g_world_proj.tan_half_h();
+    tan_half_v = g_world_proj.tan_half_v();
+    return true;
+}
+
+bool command(const char* cmd, const char* args, char* reply, size_t n)
+{
+    char a1[64] = {};
+    if (args) sscanf_s(args, "%63s", a1, static_cast<unsigned>(sizeof(a1)));
+    const bool has1 = a1[0] != 0;
+    const bool on = has1 && (!_stricmp(a1, "on") || !strcmp(a1, "1"));
+
+    if (!strcmp(cmd, "widen")) {
+        if (has1) g_fov_manual = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.5f), 3.5f);
+        _snprintf_s(reply, n, _TRUNCATE, "widen manual=%.2f auto=%s (%.2f/%.2f)", g_fov_manual, g_fov_auto ? "on" : "off", g_fov_widen_x, g_fov_widen_y);
+        return true;
+    }
+    if (!strcmp(cmd, "auto")) {
+        if (has1) g_fov_auto = on;
+        _snprintf_s(reply, n, _TRUNCATE, "auto FOV match %s", g_fov_auto ? "on" : "off");
+        return true;
+    }
+    if (!strcmp(cmd, "mode")) {
+        if (has1) g_vm_mode = ((atoi(a1) % 4) + 4) % 4;
+        _snprintf_s(reply, n, _TRUNCATE, "viewmodel mode %d", g_vm_mode);
+        return true;
+    }
+    if (!strcmp(cmd, "push")) {
+        if (has1) g_vm_push = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.0f), 2.0f);
+        _snprintf_s(reply, n, _TRUNCATE, "viewmodel push %.2f m", g_vm_push);
+        return true;
+    }
+    if (!strcmp(cmd, "ownproj")) {
+        if (has1) g_ownproj_on = on;
+        _snprintf_s(reply, n, _TRUNCATE, "per-draw own-projection correction %s", g_ownproj_on ? "on" : "off");
+        return true;
+    }
+    if (!strcmp(cmd, "bones")) {
+        if (has1) g_vm_th.require_bones = on;
+        _snprintf_s(reply, n, _TRUNCATE, "classifier require_bones=%d", g_vm_th.require_bones ? 1 : 0);
+        return true;
+    }
+    if (!strcmp(cmd, "pos")) {
+        if (has1) g_pos_enabled = on;
+        _snprintf_s(reply, n, _TRUNCATE, "6DOF position %s", g_pos_enabled ? "on" : "off");
+        return true;
+    }
+    if (!strcmp(cmd, "ipd")) {
+        if (has1) { g_ipd_manual = true; g_ipd_world = static_cast<float>(atof(a1)); }
+        _snprintf_s(reply, n, _TRUNCATE, "ipd %.4f (%s)", g_ipd_world, g_ipd_manual ? "manual" : "auto");
+        return true;
+    }
+    if (!strcmp(cmd, "recenter")) { recenter(); _snprintf_s(reply, n, _TRUNCATE, "recentered"); return true; }
+    if (!strcmp(cmd, "correct")) {
+        if (has1) { g_correct_on = on; g_user_disabled = !on; }
+        _snprintf_s(reply, n, _TRUNCATE, "correction %s", g_correct_on ? "on" : "off");
+        return true;
+    }
+    return false;
+}
+
+void status(FILE* f)
+{
+    float yaw = 0.0f, pitch = 0.0f;
+    if (g_hmd_active) { yaw = g_hmd_yaw; pitch = g_hmd_pitch; }
+    fprintf(f, "correct=%d hmd=%d eye=%d ipd=%.4f%s pos6dof=%d frame=%u modified/frame=%u\n",
+            g_correct_on ? 1 : 0, g_hmd_active ? 1 : 0, g_frame_eye, g_ipd_world, g_ipd_manual ? "(manual)" : "",
+            g_pos_enabled ? 1 : 0, g_frame_index, g_modified_last_frame);
+    fprintf(f, "hmd yaw=%.1f pitch=%.1f deg  dpos=(%.3f %.3f %.3f)\n",
+            yaw * 180.0f / kPi, pitch * 180.0f / kPi, g_hmd_dpos[0], g_hmd_dpos[1], g_hmd_dpos[2]);
+    fprintf(f, "fov: auto=%d manual=%.2f widen=%.2f/%.2f  world tan=%.4f/%.4f near=%.3f far=%.1f (deg %.1f x %.1f)\n",
+            g_fov_auto ? 1 : 0, g_fov_manual, g_fov_widen_x, g_fov_widen_y,
+            g_world_proj.tan_half_h(), g_world_proj.tan_half_v(), g_world_proj.near_z(), g_world_proj.far_z(),
+            2.0f * std::atan(g_world_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_world_proj.tan_half_v()) * 180.0f / kPi);
+    fprintf(f, "viewmodel: mode=%d push=%.2f ownproj=%d require_bones=%d  VIEWMODEL writes=%u own-P writes=%u\n",
+            g_vm_mode, g_vm_push, g_ownproj_on ? 1 : 0, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last);
+    fprintf(f, "vm-hist view-space <0.1:%u <0.5:%u <1:%u <2:%u <5:%u >5:%u\n",
+            g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2], g_vm_hist_last[3], g_vm_hist_last[4], g_vm_hist_last[5]);
+    fprintf(f, "camera eye=(%.2f %.2f %.2f) fwd=(%.3f %.3f %.3f)\n", g_eye[0], g_eye[1], g_eye[2], g_cam_rows[6], g_cam_rows[7], g_cam_rows[8]);
+}
 
 bool game_proj_tangents(float& tan_half_h, float& tan_half_v)
 {
