@@ -20,9 +20,9 @@ still culls at its native frustum), the gun visibly smaller. PgUp must now revea
 *more* world rather than zoom. If the world looks warped at 90° yaw, the ordering
 is wrong and needs revisiting — that is the one in-headset check this fix needs.
 
-## 1. Draw census (INSERT)
+## 1. Draw census (`]` key)
 
-`draw_diag.cpp`. Press **INSERT** in game (standing still, weapon visible, ideally
+`draw_diag.cpp`. Press **`]`** in game (standing still, weapon visible, ideally
 an enemy or teammate a few metres away for contrast). Four frames of every draw call
 are folded into signatures keyed by *(vertex shader, game call-site RVA, z-enable,
 z-write, alpha-blend, render target is backbuffer + size, projection class, has
@@ -58,14 +58,14 @@ requirement for experiments. `ctest --test-dir build -C Release` runs the
 deterministic tests (projection recovery round-trip, correction collapses to the
 global one when `P_vm == P`, classifier edge cases).
 
-## 3. Viewmodel correction (DELETE cycles, `-`/`=` push)
+## 3. Viewmodel correction (DELETE / `[` cycles, `-`/`=` push)
 
 For classified writes: `M' = M · P_vm⁻¹ · Δ · C_view · P_sel`, with `C_view =
 V⁻¹·r·V` the frame's head/6DOF/eye/FOV correction in view space and `Δ` the
 weapon's own offset in the *body* camera frame (push along +z now; a controller
 grip delta later, same slot — BFVR's `World·sourceView·gripDelta·residualEye·P`).
 
-| DELETE mode | `P_sel` | Expect |
+| mode (DELETE / `[`) | `P_sel` | Expect |
 |---|---|---|
 | 0 | — (global correction for everything) | today's behaviour |
 | **1 (default)** | the weapon's own P | the Phase-3 distortion gone; if `P_vm == P` this is identical to mode 0 |
@@ -84,7 +84,7 @@ view-space distance histogram of all corrected writes.
 
 | Key | Action |
 |---|---|
-| INSERT | 4-frame draw census → `bfbc2vr_draws_NN.txt` |
-| DELETE | cycle viewmodel projection mode 0→1→2→3 |
-| Shift+DELETE | toggle classifier bone requirement |
+| `]` | 4-frame draw census → `bfbc2vr_draws_NN.txt` |
+| DELETE or `[` | cycle viewmodel projection mode 0→1→2→3 |
+| Shift + (DELETE or `[`) | toggle classifier bone requirement |
 | `-` / `=` | viewmodel push −/+ 0.05 m |

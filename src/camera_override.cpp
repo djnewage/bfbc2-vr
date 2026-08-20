@@ -831,9 +831,9 @@ void on_present()
         g_vm_push = (std::min)(g_vm_push + 0.05f, 1.0f);
         VRLOG("[viewmodel] push -> %.2f m", g_vm_push);
     }
-    // DELETE cycles the viewmodel projection mode. Shift+DELETE toggles the
-    // bone requirement of the classifier (for reading the census evidence).
-    if (key_pressed(VK_DELETE)) {
+    // DELETE (or '[' on keyboards without it) cycles the viewmodel projection
+    // mode. With Shift: toggles the classifier's bone requirement instead.
+    if (key_pressed(VK_DELETE) || key_pressed(VK_OEM_4)) {
         if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
             g_vm_th.require_bones = !g_vm_th.require_bones;
             VRLOG("[viewmodel] classifier require_bones=%d", g_vm_th.require_bones ? 1 : 0);
@@ -843,8 +843,9 @@ void on_present()
             VRLOG("[viewmodel] mode %d: %s", g_vm_mode, names[g_vm_mode]);
         }
     }
-    // INSERT: draw census - 4 frames of per-draw signatures to bfbc2vr_draws_NN.txt.
-    if (key_pressed(VK_INSERT)) {
+    // ']' : draw census - 4 frames of per-draw signatures to bfbc2vr_draws_NN.txt.
+    // (Was INSERT; not every keyboard has one.)
+    if (key_pressed(VK_OEM_6)) {
         drawdiag::request_capture(4);
     }
 
