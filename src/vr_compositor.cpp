@@ -616,7 +616,7 @@ void hud_on_game_set_render_target()
     if (g_hud_saved_rt) { g_hud_saved_rt->Release(); g_hud_saved_rt = nullptr; }
 }
 
-bool command(const char* cmd, const char*, char* reply, size_t n)
+bool command(const char* cmd, const char* args, char* reply, size_t n)
 {
     if (!strcmp(cmd, "shot")) {
         if (!g_device) { _snprintf_s(reply, n, _TRUNCATE, "shot: no device yet"); return true; }
