@@ -132,10 +132,18 @@ bool  g_have_eye       = false;
 // Cost, stated plainly: the engine still CPU-culls at its native frustum, so
 // edge pop-in grows with these factors, and the same backbuffer now covers
 // more degrees, so the image softens. PgDn trades field back for sharpness.
+// 2026-08-20: AUTO IS OFF BY DEFAULT. With K live (it was dead until today)
+// the full 2.6x/3.4x match rendered far outside the ~58x45 deg cone the
+// ENGINE culls against (settings.ini Fov does nothing - tangents identical at
+// 55 and 90), so sky, terrain patches and trees outside it were never drawn:
+// gray void over most of the eye. Until the engine's own FOV is patched
+// (engine-hook track), the honest default is 1.0: correct geometry in a
+// theater window. PgUp/PgDn widen manually; Shift+PgUp toggles the auto match
+// back on to see the void for yourself.
 float g_fov_widen_x = 1.0f;
 float g_fov_widen_y = 1.0f;
-float g_fov_manual  = 1.0f;   // PgUp/PgDn multiplier on top of auto
-bool  g_fov_auto    = true;
+float g_fov_manual  = 1.0f;   // PgUp/PgDn multiplier (on top of auto when auto is on)
+bool  g_fov_auto    = false;
 
 // Viewmodel handling (2026-08-20, after the BFVR study - docs/prior-art-bfvr.md).
 //
@@ -242,7 +250,7 @@ bool base_tangents(float& th, float& tv)
 // game starts drawing.
 void update_auto_fov()
 {
-    if (!g_fov_auto) return;
+    if (!g_fov_auto) { g_fov_widen_x = g_fov_widen_y = 1.0f; return; }
     auto* sys = vrtrack::system();
     if (!sys) return;
 
@@ -857,12 +865,17 @@ void on_present()
     // FOV trim on top of the automatic match (PgUp wider / PgDn narrower).
     // PgDn trades field for sharpness and less edge pop-in.
     if (key_pressed(VK_PRIOR)) {
-        g_fov_manual = (std::min)(g_fov_manual + 0.05f, 1.5f);
-        VRLOG("[fov] trim -> %.2fx (auto %.2f/%.2f)", g_fov_manual, g_fov_widen_x, g_fov_widen_y);
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+            g_fov_auto = !g_fov_auto;
+            VRLOG("[fov] auto headset match %s (expect engine-cull void beyond ~58x45 deg when on)", g_fov_auto ? "ON" : "off");
+        } else {
+            g_fov_manual = (std::min)(g_fov_manual + 0.05f, 3.5f);
+            VRLOG("[fov] widen -> %.2fx (auto %s %.2f/%.2f)", g_fov_manual, g_fov_auto ? "on" : "off", g_fov_widen_x, g_fov_widen_y);
+        }
     }
     if (key_pressed(VK_NEXT)) {
         g_fov_manual = (std::max)(g_fov_manual - 0.05f, 0.5f);
-        VRLOG("[fov] trim -> %.2fx (auto %.2f/%.2f)", g_fov_manual, g_fov_widen_x, g_fov_widen_y);
+        VRLOG("[fov] widen -> %.2fx (auto %s %.2f/%.2f)", g_fov_manual, g_fov_auto ? "on" : "off", g_fov_widen_x, g_fov_widen_y);
     }
 
     if (key_pressed(VK_END)) {
