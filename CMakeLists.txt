@@ -17,6 +17,8 @@ add_library(d3d9 SHARED
     src/logger.cpp
     src/constants.cpp
     src/camera_override.cpp
+    src/draw_policy.cpp
+    src/draw_diag.cpp
     src/shader_registry.cpp
     src/vr_tracking.cpp
     src/vr_compositor.cpp
@@ -52,3 +54,18 @@ target_link_libraries(d3d9 PRIVATE
     dxguid.lib
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/openvr/lib/win32/openvr_api.lib
 )
+
+# ---------------------------------------------------------------------------
+# Deterministic tests for the pure policy modules. No D3D, no VR runtime - a
+# console exe that exits 0. Run with:  ctest --test-dir build -C Release
+option(BFBC2VR_BUILD_TESTS "Build the draw_policy unit tests" ON)
+if(BFBC2VR_BUILD_TESTS)
+    enable_testing()
+    add_executable(draw_policy_tests tests/draw_policy_test.cpp src/draw_policy.cpp)
+    target_include_directories(draw_policy_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(draw_policy_tests PRIVATE /W4 /permissive-)
+        set_property(TARGET draw_policy_tests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    add_test(NAME draw_policy COMMAND draw_policy_tests)
+endif()

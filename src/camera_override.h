@@ -47,6 +47,8 @@
 //   F5  reset the synthetic angle
 #pragma once
 
+#include <d3d9.h>
+
 #include <vector>
 
 namespace camover {
@@ -58,6 +60,14 @@ constexpr unsigned kCamWorldBase = 189;   // c189..c192, camera-to-world
 
 // If this write covers the probed block, fills `scratch` with a corrected copy
 // and returns true; the caller forwards `scratch` instead of the game's buffer.
+// Draw census + per-draw classification plumbing (2026-08-20). The wrapper
+// reports every draw with the game's call site; the render-state and
+// render-target shadows let the census key on z/alpha state and on whether
+// the draw lands in the backbuffer. All cheap no-ops unless a census is armed.
+void on_draw(const void* return_address, bool indexed, unsigned prim_count);
+void note_render_state(unsigned state, unsigned value);
+void note_render_target(IDirect3DSurface9* surface);
+
 bool transform(unsigned start_register, const float* data, unsigned vec4_count,
                std::vector<float>& scratch);
 

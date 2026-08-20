@@ -1,6 +1,10 @@
 #include "camera_override.h"
 #include "shader_registry.h"
 #include "vr_tracking.h"
+#include "vr_compositor.h"
+#include "draw_policy.h"
+#include "draw_diag.h"
+#include "mat4.h"
 #include "logger.h"
 
 #include <openvr.h>   // GetProjectionRaw, for auto FOV widening
@@ -13,6 +17,8 @@
 
 namespace camover {
 namespace {
+
+using namespace m4;
 
 constexpr float kPi = 3.14159265358979f;
 constexpr float kDegPerSecond = 25.0f;   // slow enough to read as deliberate
@@ -94,7 +100,7 @@ void note_shape(unsigned start, unsigned count)
 }
 
 // Row-major, row-vector convention (v' = v * M) - what Phase 2 measured.
-using Mat4 = float[16];
+// Mat4 and its helpers live in mat4.h so the pure policy code shares them.
 
 float g_vp[16]         = {};   // last seen view-projection, from c185-c188
 float g_vp_inv[16]     = {};   // its inverse, refreshed with the correction
@@ -131,115 +137,72 @@ float g_fov_widen_y = 1.0f;
 float g_fov_manual  = 1.0f;   // PgUp/PgDn multiplier on top of auto
 bool  g_fov_auto    = true;
 
-// Viewmodel push. Flat FPS games compose the first-person weapon for a 2D
-// screen and park it ~30cm from the camera; at true VR scale that is against
-// your face. Real VR puts a held weapon at arm's length. Draws whose recovered
-// world position sits within kRadius of the eye get an extra shove along the
-// camera's forward axis - moved out, not scaled, so it subtends a smaller
-// angle the way a real arm's-length object would.
-// Minus/Equals keys tune it live.
-// OFF by default. At 2.0m radius the detector matched ~700 draws per frame -
-// a quarter of the scene, not a weapon - and shoving all of it forward is why
-// the view broke. Proximity alone is too blunt; the histogram below measures
-// how the scene actually distributes so the radius can be chosen, not guessed.
-float g_vm_push   = 0.0f;    // world units (meters) forward; 0 = disabled
-float g_vm_radius = 0.25f;   // tight: only geometry essentially AT the eye
-float g_correction_near[16] = {};
-bool  g_have_correction_near = false;
-unsigned g_vm_hits = 0, g_vm_hits_last = 0;
-float    g_vm_nearest = 1e9f, g_vm_nearest_last = 0.0f;
+// Viewmodel handling (2026-08-20, after the BFVR study - docs/prior-art-bfvr.md).
+//
+// Distance-to-camera was the wrong discriminator: at 2.0m it matched ~700
+// draws a frame. Draws are now classified per WRITE by the pure policy in
+// draw_policy.cpp from three facts: the active shader declares a bone palette,
+// the object's origin recovered in VIEW space sits at the eye, and - the
+// decisive one - whether the draw's own projection (recovered from its WVP)
+// differs from the world's. A viewmodel rendered with its own FOV/near plane
+// is both the reason the weapon distorted under the global correction (which
+// assumes P) and the cleanest way to recognise it.
+//
+// Classified draws get their own correction,  P_vm^-1 * Delta * C_view * P_sel,
+// built from the frame's head/eye/FOV correction expressed in view space.
+// Delta is the weapon's offset in the body camera's frame - an arm's-length
+// push today, a controller grip delta later - applied BEFORE the eye offset so
+// both eyes share one adjusted weapon pose. Minus/Equals tune the push,
+// DELETE cycles which projection the weapon is re-rendered with.
+float g_vm_push   = 0.0f;    // metres forward along the body camera; 0 = none
+int   g_vm_mode   = 1;       // 0 off, 1 own P (distortion fix only), 2 hybrid, 3 world P
+drawpolicy::Thresholds g_vm_th;
+drawpolicy::ProjParams g_world_proj;      // recovered from VP once per frame
+float g_cview[16] = {};                   // V^-1 * r * V: the frame's correction in view space
+bool  g_have_cview = false;
+unsigned g_vm_hits = 0, g_vm_hits_last = 0;          // classified writes per frame
+unsigned g_vm_ownp = 0, g_vm_ownp_last = 0;          // of which: own-projection evidence
+unsigned g_frame_index = 0;
 
-// Distance histogram of corrected draws, so the viewmodel's real distance band
-// is measurable rather than assumed.
+// Per-frame cache of the viewmodel correction, keyed by the projection it was
+// built for - the weapon typically uses one P, so this is a 1-entry cache.
+struct VmCorrection {
+    drawpolicy::ProjParams key;
+    unsigned frame = ~0u;
+    float    c[16] = {};
+    bool     valid = false;
+};
+VmCorrection g_vmcorr;
+
+// View-space distance histogram of every corrected write, so the scene's
+// distribution stays measurable (and the viewmodel band visible).
 constexpr float kBuckets[5] = { 0.1f, 0.5f, 1.0f, 2.0f, 5.0f };
 unsigned g_vm_hist[6] = {}, g_vm_hist_last[6] = {};
+
+// Render-state / render-target shadow for the draw census. D3D9 state is
+// device-global and the game renders from one thread, so plain globals.
+unsigned g_rs_z = 1, g_rs_zw = 1, g_rs_ab = 0;
+bool     g_rt_is_bb = true;
+unsigned g_rt_w = 0, g_rt_h = 0;
+
+// The last WVP analysed on this thread, attributed to the draw that follows.
+struct PendingWvp {
+    const void* shader = nullptr;
+    bool  valid = false;
+    drawpolicy::ProjParams p;
+    drawpolicy::ProjClass  pc = drawpolicy::ProjClass::NoWvp;
+    drawpolicy::DrawClass  cls = drawpolicy::DrawClass::Unclassified;
+    float view_origin[3] = {};
+    float view_dist = -1.0f;
+    float w33 = 0.0f, w23 = 0.0f;
+    bool  have_bone0 = false;
+    float bone0[12] = {};
+};
+thread_local PendingWvp t_pending;
+
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
 
-inline float& at(Mat4 m, int r, int c)       { return m[r * 4 + c]; }
-inline float  at(const Mat4 m, int r, int c) { return m[r * 4 + c]; }
-
-void identity(Mat4 m)
-{
-    std::memset(m, 0, sizeof(float) * 16);
-    at(m, 0, 0) = at(m, 1, 1) = at(m, 2, 2) = at(m, 3, 3) = 1.0f;
-}
-
-void multiply(const Mat4 a, const Mat4 b, Mat4 out)
-{
-    for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c) {
-            float sum = 0.0f;
-            for (int k = 0; k < 4; ++k) sum += at(a, r, k) * at(b, k, c);
-            at(out, r, c) = sum;
-        }
-}
-
-void rotation_y(float rad, Mat4 m)
-{
-    identity(m);
-    const float s = std::sin(rad), c = std::cos(rad);
-    at(m, 0, 0) =  c; at(m, 0, 2) = -s;
-    at(m, 2, 0) =  s; at(m, 2, 2) =  c;
-}
-
-void transpose(const Mat4 m, Mat4 out)
-{
-    for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c)
-            at(out, r, c) = at(m, c, r);
-}
-
-// Rodrigues rotation about an arbitrary (normalized) axis, row-vector form.
-void rotation_axis(const float axis[3], float rad, Mat4 m)
-{
-    const float c = std::cos(rad), s = std::sin(rad), t = 1.0f - c;
-    const float x = axis[0], y = axis[1], z = axis[2];
-    identity(m);
-    at(m,0,0) = t*x*x + c;   at(m,0,1) = t*x*y + s*z; at(m,0,2) = t*x*z - s*y;
-    at(m,1,0) = t*x*y - s*z; at(m,1,1) = t*y*y + c;   at(m,1,2) = t*y*z + s*x;
-    at(m,2,0) = t*x*z + s*y; at(m,2,1) = t*y*z - s*x; at(m,2,2) = t*z*z + c;
-}
-
-void translation(float x, float y, float z, Mat4 m)
-{
-    identity(m);
-    at(m, 3, 0) = x; at(m, 3, 1) = y; at(m, 3, 2) = z;
-}
-
-// General 4x4 inverse (cofactor expansion). A projection matrix is not affine,
-// so the cheap affine-inverse shortcut does not apply here.
-bool invert(const Mat4 m, Mat4 out)
-{
-    float inv[16];
-
-    inv[0]  =  m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
-    inv[4]  = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
-    inv[8]  =  m[4]*m[9]*m[15]  - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
-    inv[12] = -m[4]*m[9]*m[14]  + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
-
-    inv[1]  = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
-    inv[5]  =  m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
-    inv[9]  = -m[0]*m[9]*m[15]  + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
-    inv[13] =  m[0]*m[9]*m[14]  - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
-
-    inv[2]  =  m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
-    inv[6]  = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
-    inv[10] =  m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
-    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
-
-    inv[3]  = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
-    inv[7]  =  m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
-    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9]  + m[4]*m[1]*m[11] - m[4]*m[3]*m[9]  - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
-    inv[15] =  m[0]*m[5]*m[10] - m[0]*m[6]*m[9]  - m[4]*m[1]*m[10] + m[4]*m[2]*m[9]  + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
-
-    float det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
-    if (std::fabs(det) < 1e-12f) return false;
-
-    det = 1.0f / det;
-    for (int i = 0; i < 16; ++i) out[i] = inv[i] * det;
-    return true;
-}
 
 // The game's native (un-widened) projection half-angle tangents, recovered
 // from VP: rows 0/1 are rotation rows scaled by the projection's x/y factors,
@@ -296,37 +259,6 @@ void update_auto_fov()
     }
 }
 
-// Is this stored transform block a draw sitting right on top of the camera?
-// World = WVP * VP^-1, and its translation row is the object's world position.
-bool is_near_camera(const float* stored_block)
-{
-    if (!g_have_vp_inv || !g_have_eye) return false;
-
-    Mat4 wvp, world;
-    if (g_transposed) transpose(reinterpret_cast<const float(&)[16]>(*stored_block), wvp);
-    else              std::memcpy(wvp, stored_block, sizeof(wvp));
-    multiply(wvp, g_vp_inv, world);
-
-    const float w = at(world, 3, 3);
-    if (std::fabs(w) < 1e-4f) return false;
-    const float dx = at(world, 3, 0) / w - g_eye[0];
-    const float dy = at(world, 3, 1) / w - g_eye[1];
-    const float dz = at(world, 3, 2) / w - g_eye[2];
-
-    // Track the closest draw seen, so the log says whether ANY geometry is
-    // near the camera - if the nearest is metres away, the viewmodel's world
-    // matrix does not encode its position and distance is the wrong test.
-    const float d2 = dx*dx + dy*dy + dz*dz;
-    const float d  = std::sqrt(d2);
-    if (d < g_vm_nearest) g_vm_nearest = d;
-
-    int b = 5;
-    for (int i = 0; i < 5; ++i) { if (d < kBuckets[i]) { b = i; break; } }
-    ++g_vm_hist[b];
-
-    if (d2 < (g_vm_radius * g_vm_radius)) { ++g_vm_hits; return true; }
-    return false;
-}
 
 bool key_pressed(int vk)
 {
@@ -450,47 +382,11 @@ void rebuild_correction()
         std::memcpy(r, r2, sizeof(r));
     }
 
-    // FOV widening: K = V * S * M_cw, a camera-space lateral shrink conjugated
-    // into world space. Scaling camera x/y by 1/widen before projection makes
-    // the same image cover widen-times the field. V and M_cw carry the eye
-    // position, so no extra recentering is needed.
-    const float wx = g_fov_widen_x * g_fov_manual;
-    const float wy = g_fov_widen_y * g_fov_manual;
-    if ((wx > 1.001f || wy > 1.001f) && g_have_eye) {
-        Mat4 mcw, view, scale, tmp2, k;
-        identity(mcw);
-        for (int r2 = 0; r2 < 3; ++r2)
-            for (int c2 = 0; c2 < 3; ++c2)
-                at(mcw, r2, c2) = g_cam_rows[r2 * 3 + c2];
-        at(mcw, 3, 0) = g_eye[0]; at(mcw, 3, 1) = g_eye[1]; at(mcw, 3, 2) = g_eye[2];
-
-        // Affine inverse of a rotation+translation: linear part transposes,
-        // translation is -eye through the transposed rotation.
-        identity(view);
-        for (int r2 = 0; r2 < 3; ++r2)
-            for (int c2 = 0; c2 < 3; ++c2)
-                at(view, r2, c2) = g_cam_rows[c2 * 3 + r2];
-        for (int c2 = 0; c2 < 3; ++c2) {
-            at(view, 3, c2) = -(g_eye[0] * at(view, 0, c2) +
-                                g_eye[1] * at(view, 1, c2) +
-                                g_eye[2] * at(view, 2, c2));
-        }
-
-        identity(scale);
-        at(scale, 0, 0) = 1.0f / wx;
-        at(scale, 1, 1) = 1.0f / wy;
-
-        multiply(view, scale, tmp2);
-        multiply(tmp2, mcw, k);
-
-        Mat4 combined;
-        multiply(k, rot, combined);
-        std::memcpy(rot, combined, sizeof(rot));
-    }
-
     // Stereo eye offset: shift the camera half an IPD along its right axis.
     // Shifting the CAMERA right by d == shifting the WORLD left by d, so the
-    // world translation is -d for the right eye, +d for the left.
+    // world translation is -d for the right eye, +d for the left. After the
+    // rotation above the fixed camera's axes ARE the head's axes, so this is
+    // the head's right.
     if (g_hmd_active) {
         // Note: F1 eye-swap is applied at SUBMISSION (last_rendered_eye), not
         // here - applying it in both places would cancel itself out.
@@ -502,22 +398,88 @@ void rebuild_correction()
         std::memcpy(r, r2, sizeof(r));
     }
 
+    // Camera-to-world (M_cw) and its affine inverse (V) from c189-c192. Needed
+    // by the FOV scale below and by the view-space form of the correction.
+    Mat4 mcw, view;
+    identity(mcw);
+    for (int r2 = 0; r2 < 3; ++r2)
+        for (int c2 = 0; c2 < 3; ++c2)
+            at(mcw, r2, c2) = g_cam_rows[r2 * 3 + c2];
+    at(mcw, 3, 0) = g_eye[0]; at(mcw, 3, 1) = g_eye[1]; at(mcw, 3, 2) = g_eye[2];
+    identity(view);
+    for (int r2 = 0; r2 < 3; ++r2)
+        for (int c2 = 0; c2 < 3; ++c2)
+            at(view, r2, c2) = g_cam_rows[c2 * 3 + r2];
+    for (int c2 = 0; c2 < 3; ++c2) {
+        at(view, 3, c2) = -(g_eye[0] * at(view, 0, c2) +
+                            g_eye[1] * at(view, 1, c2) +
+                            g_eye[2] * at(view, 2, c2));
+    }
+
+    // FOV widening: K = V * S * M_cw, a camera-space lateral shrink conjugated
+    // into world space. Scaling camera x/y by 1/widen before projection makes
+    // the same image cover widen-times the field.
+    //
+    // Applied LAST, in the projecting camera's frame. BUG FIXED 2026-08-20:
+    // since 0afea3b this product was multiplied into `rot` AFTER `r` had been
+    // built from it, so K never reached g_correction - the game kept rendering
+    // its native field while game_proj_tangents told the compositor the image
+    // was 2-3x wider, and the bounds simply MAGNIFIED the native image. That
+    // magnification is a large part of why the weapon sat in the face.
+    const float wx = g_fov_widen_x * g_fov_manual;
+    const float wy = g_fov_widen_y * g_fov_manual;
+    if ((wx > 1.001f || wy > 1.001f) && g_have_eye) {
+        Mat4 sc, tmp2, k, r2;
+        scale(1.0f / wx, 1.0f / wy, 1.0f, sc);
+        multiply(view, sc, tmp2);
+        multiply(tmp2, mcw, k);
+        multiply(r, k, r2);
+        std::memcpy(r, r2, sizeof(r));
+    }
+
     multiply(vp_inv, r, tmp);
     multiply(tmp, g_vp, g_correction);
     g_have_correction = true;
 
-    // Second correction for near-camera draws: the same transform with an
-    // extra world-space shove along the camera's forward axis.
-    g_have_correction_near = false;
-    if (g_vm_push > 0.001f && g_have_eye) {
-        const float* fwd = &g_cam_rows[6];   // camera-to-world row 2 = forward
-        Mat4 push, r_near, tmp3;
-        translation(fwd[0] * g_vm_push, fwd[1] * g_vm_push, fwd[2] * g_vm_push, push);
-        multiply(push, r, r_near);           // push first, then the VR transform
-        multiply(vp_inv, r_near, tmp3);
-        multiply(tmp3, g_vp, g_correction_near);
-        g_have_correction_near = true;
+    // The same correction in VIEW space: C_view = V^-1 * r * V = M_cw * r * V.
+    // The viewmodel path needs it because it swaps the projection around it.
+    {
+        Mat4 t1;
+        multiply(mcw, r, t1);
+        multiply(t1, view, g_cview);
+        g_have_cview = true;
     }
+
+    // The world projection, recovered from VP the same way per-draw
+    // projections are, so comparisons are like against like.
+    if (!drawpolicy::recover_projection(g_vp, g_world_proj)) {
+        g_world_proj = drawpolicy::ProjParams{};
+    }
+    g_vmcorr.valid = false;   // rebuilt lazily on the first classified write
+}
+
+// Viewmodel correction for a draw whose own projection is `p`, cached per
+// frame. Falls back to "none" (caller uses the global correction) if the
+// math refuses.
+const float* viewmodel_correction(const drawpolicy::ProjParams& p)
+{
+    if (!g_have_cview || g_vm_mode <= 0) return nullptr;
+    const bool same_key = g_vmcorr.valid && g_vmcorr.frame == g_frame_index &&
+        g_vmcorr.key.a == p.a && g_vmcorr.key.b == p.b && g_vmcorr.key.q == p.q && g_vmcorr.key.t == p.t;
+    if (same_key) return g_vmcorr.c;
+
+    drawpolicy::ProjSelect sel = drawpolicy::ProjSelect::Viewmodel;
+    if (g_vm_mode == 2) sel = drawpolicy::ProjSelect::Hybrid;
+    if (g_vm_mode == 3) sel = drawpolicy::ProjSelect::World;
+    const drawpolicy::ProjParams psel = drawpolicy::select_projection(sel, p, g_world_proj);
+
+    Mat4 delta;
+    translation(0.0f, 0.0f, g_vm_push, delta);   // D3D view space: +z forward
+
+    g_vmcorr.key = p;
+    g_vmcorr.frame = g_frame_index;
+    g_vmcorr.valid = drawpolicy::build_viewmodel_correction(p, delta, g_cview, psel, g_vmcorr.c);
+    return g_vmcorr.valid ? g_vmcorr.c : nullptr;
 }
 
 } // namespace
@@ -562,6 +524,9 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
     }
 
     bool any = false;
+    const shaderreg::ShaderFacts* facts = shaderreg::active_facts();
+    const bool census = drawdiag::capturing();
+
     for (size_t s = 0; s < n; ++s) {
         if (!covers(start_register, vec4_count, spans[s].start)) continue;
 
@@ -570,9 +535,50 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
 
         float* target = scratch.data() + (spans[s].start - start_register) * 4;
 
-        // Viewmodel draws take the pushed-out correction.
+        // Analyse the ORIGINAL block: its own projection, the object's
+        // view-space origin, and how it compares to the world projection.
         const float* corr = g_correction;
-        if (g_have_correction_near && is_near_camera(target)) corr = g_correction_near;
+        if (g_transposed) {
+            Mat4 M;
+            drawpolicy::stored_to_matrix(target, M);
+            drawpolicy::ProjParams p;
+            const bool persp = drawpolicy::recover_projection(M, p);
+            drawpolicy::DrawSignature sig;
+            sig.has_wvp   = true;
+            sig.has_bones = facts && facts->has_bones;
+            sig.proj      = drawpolicy::compare_projection(p, g_world_proj);
+            if (persp && drawpolicy::view_origin(M, p, sig.view_origin)) {
+                sig.view_dist = std::sqrt(sig.view_origin[0]*sig.view_origin[0] +
+                                          sig.view_origin[1]*sig.view_origin[1] +
+                                          sig.view_origin[2]*sig.view_origin[2]);
+                int b = 5;
+                for (int i = 0; i < 5; ++i) { if (sig.view_dist < kBuckets[i]) { b = i; break; } }
+                ++g_vm_hist[b];
+            }
+            const drawpolicy::DrawClass cls = (g_vm_mode > 0)
+                ? drawpolicy::classify(sig, g_vm_th) : drawpolicy::DrawClass::Unclassified;
+            if (cls == drawpolicy::DrawClass::Viewmodel) {
+                ++g_vm_hits;
+                if (sig.proj != drawpolicy::ProjClass::Same) ++g_vm_ownp;
+                const float* vm = viewmodel_correction(p);
+                if (vm) corr = vm;
+            }
+
+            // Hand the analysis to the draw that follows (census only).
+            PendingWvp& pend = t_pending;
+            pend.shader = shaderreg::active_shader();
+            pend.valid  = true;
+            pend.p = p; pend.pc = sig.proj; pend.cls = cls;
+            std::memcpy(pend.view_origin, sig.view_origin, sizeof(pend.view_origin));
+            pend.view_dist = persp ? sig.view_dist : -1.0f;
+            pend.have_bone0 = false;
+            if (census && g_have_vp_inv) {
+                Mat4 res;
+                multiply(M, g_vp_inv, res);
+                pend.w33 = at(res, 3, 3);
+                pend.w23 = at(res, 2, 3);
+            }
+        }
 
         Mat4 out;
         if (g_transposed) {
@@ -589,7 +595,72 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
         std::memcpy(target, out, sizeof(out));
         ++g_modified_this_frame;
     }
+
+    // Bone palette sample for the census: the first bone (3 registers) of a
+    // boneMatrices write tells whether bones are object-space (near-identity
+    // 3x3, small translation) or carry the view.
+    if (census && facts && facts->has_bones && facts->bone_count >= 3 &&
+        start_register <= facts->bone_start && start_register + vec4_count >= facts->bone_start + 3) {
+        PendingWvp& pend = t_pending;
+        std::memcpy(pend.bone0, data + (facts->bone_start - start_register) * 4, sizeof(pend.bone0));
+        pend.have_bone0 = true;
+    }
     return any;
+}
+
+void on_draw(const void* return_address, bool indexed, unsigned prim_count)
+{
+    if (!drawdiag::capturing()) return;
+
+    drawdiag::Record rec;
+    const shaderreg::ShaderFacts* facts = shaderreg::active_facts();
+    const void* shader = shaderreg::active_shader();
+    rec.shader = shader;
+    if (facts) {
+        rec.shader_hash  = facts->hash;
+        rec.shader_bytes = facts->bytes;
+        rec.has_bones    = facts->has_bones;
+    }
+    const PendingWvp& pend = t_pending;
+    if (pend.valid && pend.shader == shader) {
+        rec.had_wvp = true;
+        rec.proj = pend.pc; rec.p = pend.p; rec.cls = pend.cls;
+        std::memcpy(rec.view_origin, pend.view_origin, sizeof(rec.view_origin));
+        rec.view_dist = pend.view_dist;
+        rec.world_dist = pend.view_dist;   // V is rigid: same number
+        rec.residue_w33 = pend.w33; rec.residue_w23 = pend.w23;
+        rec.have_bone0 = pend.have_bone0;
+        std::memcpy(rec.bone0, pend.bone0, sizeof(rec.bone0));
+    }
+    rec.z_enable = g_rs_z; rec.z_write = g_rs_zw; rec.alpha_blend = g_rs_ab;
+    rec.rt_is_backbuffer = g_rt_is_bb; rec.rt_w = g_rt_w; rec.rt_h = g_rt_h;
+    rec.indexed = indexed; rec.prims = prim_count; rec.ret = return_address;
+    drawdiag::on_draw(rec);
+}
+
+void note_render_state(unsigned state, unsigned value)
+{
+    switch (state) {
+    case D3DRS_ZENABLE:          g_rs_z  = value; break;
+    case D3DRS_ZWRITEENABLE:     g_rs_zw = value; break;
+    case D3DRS_ALPHABLENDENABLE: g_rs_ab = value; break;
+    default: break;
+    }
+}
+
+void note_render_target(IDirect3DSurface9* surface)
+{
+    IDirect3DSurface9* bb = vrcomp::backbuffer_surface();
+    g_rt_is_bb = (surface != nullptr) && (surface == bb);
+    if (g_rt_is_bb) {
+        vrcomp::backbuffer_size(g_rt_w, g_rt_h);
+    } else if (surface) {
+        D3DSURFACE_DESC d = {};
+        if (SUCCEEDED(surface->GetDesc(&d))) { g_rt_w = d.Width; g_rt_h = d.Height; }
+        else { g_rt_w = g_rt_h = 0; }
+    } else {
+        g_rt_w = g_rt_h = 0;
+    }
 }
 
 void on_present()
@@ -661,27 +732,28 @@ void on_present()
         g_angle_rad += dt * kDegPerSecond * kPi / 180.0f;
         if (g_angle_rad > 2.0f * kPi) g_angle_rad -= 2.0f * kPi;
     }
+    ++g_frame_index;
     rebuild_correction();
+    drawdiag::on_present();
 
     g_modified_last_frame = g_modified_this_frame;
     g_modified_this_frame = 0;
 
     static unsigned frames = 0;
     ++frames;
-    g_vm_hits_last    = g_vm_hits;
-    g_vm_nearest_last = (g_vm_nearest < 1e8f) ? g_vm_nearest : -1.0f;
+    g_vm_hits_last = g_vm_hits;  g_vm_hits = 0;
+    g_vm_ownp_last = g_vm_ownp;  g_vm_ownp = 0;
     std::memcpy(g_vm_hist_last, g_vm_hist, sizeof(g_vm_hist));
-    g_vm_hits = 0;
-    g_vm_nearest = 1e9f;
     std::memset(g_vm_hist, 0, sizeof(g_vm_hist));
 
     if (g_correct_on && frames % 300 == 0) {
         VRLOG("[correct] %s: modified %u transform writes last frame (fingerprints: %u found, %u none)",
               g_transposed ? "transposed" : "row-registers", g_modified_last_frame,
               g_fp_found, g_fp_rejected);
-        VRLOG("[viewmodel] push=%.2fm radius=%.2fm: %u matched, nearest %.3fm",
-              g_vm_push, g_vm_radius, g_vm_hits_last, g_vm_nearest_last);
-        VRLOG("[vm-hist] <0.1m:%u  <0.5m:%u  <1m:%u  <2m:%u  <5m:%u  >5m:%u",
+        VRLOG("[viewmodel] mode=%d push=%.2fm: %u classified writes (%u by own projection); world P tan=%.4f/%.4f near=%.3f",
+              g_vm_mode, g_vm_push, g_vm_hits_last, g_vm_ownp_last,
+              g_world_proj.tan_half_h(), g_world_proj.tan_half_v(), g_world_proj.near_z());
+        VRLOG("[vm-hist] view-space <0.1m:%u  <0.5m:%u  <1m:%u  <2m:%u  <5m:%u  >5m:%u",
               g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2],
               g_vm_hist_last[3], g_vm_hist_last[4], g_vm_hist_last[5]);
     }
@@ -758,6 +830,22 @@ void on_present()
     if (key_pressed(VK_OEM_PLUS)) {
         g_vm_push = (std::min)(g_vm_push + 0.05f, 1.0f);
         VRLOG("[viewmodel] push -> %.2f m", g_vm_push);
+    }
+    // DELETE cycles the viewmodel projection mode. Shift+DELETE toggles the
+    // bone requirement of the classifier (for reading the census evidence).
+    if (key_pressed(VK_DELETE)) {
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+            g_vm_th.require_bones = !g_vm_th.require_bones;
+            VRLOG("[viewmodel] classifier require_bones=%d", g_vm_th.require_bones ? 1 : 0);
+        } else {
+            g_vm_mode = (g_vm_mode + 1) % 4;
+            static const char* names[4] = { "OFF (global correction for all)", "own P (distortion fix)", "hybrid (world field, own depth)", "world P" };
+            VRLOG("[viewmodel] mode %d: %s", g_vm_mode, names[g_vm_mode]);
+        }
+    }
+    // INSERT: draw census - 4 frames of per-draw signatures to bfbc2vr_draws_NN.txt.
+    if (key_pressed(VK_INSERT)) {
+        drawdiag::request_capture(4);
     }
 
     // Stereo calibration.

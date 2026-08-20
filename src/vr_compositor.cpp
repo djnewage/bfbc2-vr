@@ -12,6 +12,7 @@ namespace vrcomp {
 namespace {
 
 IDirect3DDevice9*     g_device      = nullptr;   // real device, not our wrapper
+IDirect3DSurface9* g_backbuffer = nullptr;   // non-owning identity of backbuffer 0
 ID3D9VkInteropDevice* g_interop_dev = nullptr;
 
 // One texture per eye for alternate-eye rendering: each frame refreshes the
@@ -173,6 +174,7 @@ void on_device_created(IDirect3DDevice9* real_device)
         D3DSURFACE_DESC d = {};
         bb->GetDesc(&d);
         g_width = d.Width; g_height = d.Height;
+        g_backbuffer = bb;   // identity only; the swapchain owns it
         bb->Release();
     }
     VRLOG("[comp] device registered, backbuffer %ux%u", g_width, g_height);
@@ -426,6 +428,9 @@ bool submit_frame()
 }
 
 bool active() { return g_scene_ok && g_interop_ok; }
+
+IDirect3DSurface9* backbuffer_surface() { return g_backbuffer; }
+void backbuffer_size(unsigned& w, unsigned& h) { w = g_width; h = g_height; }
 
 void shutdown()
 {

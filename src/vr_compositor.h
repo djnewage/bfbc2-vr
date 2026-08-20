@@ -41,6 +41,12 @@ bool submit_frame();
 // True once the scene-app handshake and interop init have all succeeded.
 bool active();
 
+// Identity of the device's backbuffer surface (non-owning, refreshed on
+// Reset) and its size - lets the draw census tell backbuffer draws from
+// off-screen passes without a GetDesc per draw.
+IDirect3DSurface9* backbuffer_surface();
+void backbuffer_size(unsigned& w, unsigned& h);
+
 void shutdown();
 
 } // namespace vrcomp

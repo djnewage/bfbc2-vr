@@ -53,4 +53,22 @@ IDirect3DVertexShader9* active_shader();
 // transform spans - the "constants"-blob shaders that need fingerprinting.
 bool active_shader_uncharted();
 
+// Identity and facts about a shader that do not change after creation.
+// Shader POINTERS are recycled across level loads; the bytecode hash is the
+// stable identity (BFVR keys its draw-signature tables the same way).
+struct ShaderFacts {
+    unsigned long long hash        = 0;     // FNV-1a over the token stream
+    unsigned           bytes       = 0;     // token stream length in bytes
+    unsigned           ordinal     = 0;     // creation order, 1-based
+    bool               has_ctab    = false;
+    bool               has_bones   = false; // declares boneMatrices / boneVectors
+    unsigned           bone_start  = 0;     // first register of boneMatrices (if any)
+    unsigned           bone_count  = 0;
+    unsigned           transform_span_count = 0;
+};
+
+// Facts for the ACTIVE shader, or null. Lock-free on the hot path: the pointer
+// is resolved once per SetVertexShader and cached thread-locally.
+const ShaderFacts* active_facts();
+
 } // namespace shaderreg

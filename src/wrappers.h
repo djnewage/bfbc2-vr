@@ -101,7 +101,8 @@ public:
     HRESULT STDMETHODCALLTYPE StretchRect(IDirect3DSurface9* a, const RECT* ra, IDirect3DSurface9* b, const RECT* rb, D3DTEXTUREFILTERTYPE f) override { return m_real->StretchRect(a, ra, b, rb, f); }
     HRESULT STDMETHODCALLTYPE ColorFill(IDirect3DSurface9* s, const RECT* r, D3DCOLOR c) override { return m_real->ColorFill(s, r, c); }
     HRESULT STDMETHODCALLTYPE CreateOffscreenPlainSurface(UINT w, UINT h, D3DFORMAT f, D3DPOOL p, IDirect3DSurface9** s, HANDLE* sh) override { return m_real->CreateOffscreenPlainSurface(w, h, f, p, s, sh); }
-    HRESULT STDMETHODCALLTYPE SetRenderTarget(DWORD i, IDirect3DSurface9* s) override { return m_real->SetRenderTarget(i, s); }
+    // Intercepted: render-target shadow for the draw census (see draw_diag.h).
+    HRESULT STDMETHODCALLTYPE SetRenderTarget(DWORD i, IDirect3DSurface9* s) override;
     HRESULT STDMETHODCALLTYPE GetRenderTarget(DWORD i, IDirect3DSurface9** s) override { return m_real->GetRenderTarget(i, s); }
     HRESULT STDMETHODCALLTYPE SetDepthStencilSurface(IDirect3DSurface9* s) override { return m_real->SetDepthStencilSurface(s); }
     HRESULT STDMETHODCALLTYPE GetDepthStencilSurface(IDirect3DSurface9** s) override { return m_real->GetDepthStencilSurface(s); }
@@ -119,7 +120,8 @@ public:
     HRESULT STDMETHODCALLTYPE GetLightEnable(DWORD i, BOOL* e) override { return m_real->GetLightEnable(i, e); }
     HRESULT STDMETHODCALLTYPE SetClipPlane(DWORD i, const float* p) override { return m_real->SetClipPlane(i, p); }
     HRESULT STDMETHODCALLTYPE GetClipPlane(DWORD i, float* p) override { return m_real->GetClipPlane(i, p); }
-    HRESULT STDMETHODCALLTYPE SetRenderState(D3DRENDERSTATETYPE s, DWORD v) override { return m_real->SetRenderState(s, v); }
+    // Intercepted: z/alpha shadow for the draw census.
+    HRESULT STDMETHODCALLTYPE SetRenderState(D3DRENDERSTATETYPE s, DWORD v) override;
     HRESULT STDMETHODCALLTYPE GetRenderState(D3DRENDERSTATETYPE s, DWORD* v) override { return m_real->GetRenderState(s, v); }
     HRESULT STDMETHODCALLTYPE CreateStateBlock(D3DSTATEBLOCKTYPE t, IDirect3DStateBlock9** b) override { return m_real->CreateStateBlock(t, b); }
     HRESULT STDMETHODCALLTYPE BeginStateBlock() override { return m_real->BeginStateBlock(); }
@@ -144,10 +146,12 @@ public:
     HRESULT STDMETHODCALLTYPE SetNPatchMode(float n) override { return m_real->SetNPatchMode(n); }
     float   STDMETHODCALLTYPE GetNPatchMode() override { return m_real->GetNPatchMode(); }
 
-    HRESULT STDMETHODCALLTYPE DrawPrimitive(D3DPRIMITIVETYPE t, UINT s, UINT c) override { return m_real->DrawPrimitive(t, s, c); }
-    HRESULT STDMETHODCALLTYPE DrawIndexedPrimitive(D3DPRIMITIVETYPE t, INT b, UINT mi, UINT nv, UINT si, UINT pc) override { return m_real->DrawIndexedPrimitive(t, b, mi, nv, si, pc); }
-    HRESULT STDMETHODCALLTYPE DrawPrimitiveUP(D3DPRIMITIVETYPE t, UINT c, const void* d, UINT st) override { return m_real->DrawPrimitiveUP(t, c, d, st); }
-    HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE t, UINT mi, UINT nv, UINT pc, const void* id, D3DFORMAT idf, const void* vd, UINT vs) override { return m_real->DrawIndexedPrimitiveUP(t, mi, nv, pc, id, idf, vd, vs); }
+    // Intercepted: every draw is reported to camera_override::on_draw with its
+    // game call site (the return address of the call into our vtable).
+    HRESULT STDMETHODCALLTYPE DrawPrimitive(D3DPRIMITIVETYPE t, UINT s, UINT c) override;
+    HRESULT STDMETHODCALLTYPE DrawIndexedPrimitive(D3DPRIMITIVETYPE t, INT b, UINT mi, UINT nv, UINT si, UINT pc) override;
+    HRESULT STDMETHODCALLTYPE DrawPrimitiveUP(D3DPRIMITIVETYPE t, UINT c, const void* d, UINT st) override;
+    HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE t, UINT mi, UINT nv, UINT pc, const void* id, D3DFORMAT idf, const void* vd, UINT vs) override;
     HRESULT STDMETHODCALLTYPE ProcessVertices(UINT sv, UINT di, UINT vc, IDirect3DVertexBuffer9* vb, IDirect3DVertexDeclaration9* vd, DWORD f) override { return m_real->ProcessVertices(sv, di, vc, vb, vd, f); }
     HRESULT STDMETHODCALLTYPE CreateVertexDeclaration(const D3DVERTEXELEMENT9* e, IDirect3DVertexDeclaration9** d) override { return m_real->CreateVertexDeclaration(e, d); }
     HRESULT STDMETHODCALLTYPE SetVertexDeclaration(IDirect3DVertexDeclaration9* d) override { return m_real->SetVertexDeclaration(d); }

@@ -9,6 +9,7 @@
 //   Present                   frame submit, retargeted to OpenXR (Phase 3)
 
 #include "wrappers.h"
+#include <intrin.h>   // _ReturnAddress
 #include "constants.h"
 #include "camera_override.h"
 #include "shader_registry.h"
@@ -203,6 +204,48 @@ HRESULT STDMETHODCALLTYPE D3D9SwapChainWrapper::Present(const RECT* src, const R
     shaderreg::on_present();
     vrcomp::submit_frame();
     return m_real->Present(src, dst, wnd, dirty, flags);
+}
+
+// ---------------------------------------------------------------------------
+// Draw census hooks. _ReturnAddress() here is the game's call site: the game
+// holds our wrapper pointer and calls through our vtable, and these are
+// out-of-line virtuals, so the return address is inside BFBC2Game.exe.
+// ---------------------------------------------------------------------------
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetRenderState(D3DRENDERSTATETYPE s, DWORD v)
+{
+    camover::note_render_state(static_cast<unsigned>(s), static_cast<unsigned>(v));
+    return m_real->SetRenderState(s, v);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetRenderTarget(DWORD i, IDirect3DSurface9* s)
+{
+    if (i == 0) camover::note_render_target(s);
+    return m_real->SetRenderTarget(i, s);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawPrimitive(D3DPRIMITIVETYPE t, UINT s, UINT c)
+{
+    camover::on_draw(_ReturnAddress(), false, c);
+    return m_real->DrawPrimitive(t, s, c);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawIndexedPrimitive(D3DPRIMITIVETYPE t, INT b, UINT mi, UINT nv, UINT si, UINT pc)
+{
+    camover::on_draw(_ReturnAddress(), true, pc);
+    return m_real->DrawIndexedPrimitive(t, b, mi, nv, si, pc);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawPrimitiveUP(D3DPRIMITIVETYPE t, UINT c, const void* d, UINT st)
+{
+    camover::on_draw(_ReturnAddress(), false, c);
+    return m_real->DrawPrimitiveUP(t, c, d, st);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE t, UINT mi, UINT nv, UINT pc, const void* id, D3DFORMAT idf, const void* vd, UINT vs)
+{
+    camover::on_draw(_ReturnAddress(), true, pc);
+    return m_real->DrawIndexedPrimitiveUP(t, mi, nv, pc, id, idf, vd, vs);
 }
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::CreateVertexShader(const DWORD* fn, IDirect3DVertexShader9** s)

@@ -37,6 +37,8 @@ struct ShaderInfo {
     // name -> (first register, register count), float constants only
     std::map<std::string, std::pair<unsigned, unsigned>> constants;
 
+    ShaderFacts facts;
+
     // Pre-resolved clip-space transform spans, so the per-write hot path is an
     // array read instead of string lookups under a lock.
     Span     transform_spans[kMaxSpans];
@@ -58,6 +60,32 @@ std::set<std::string> g_logged_names;
 
 unsigned g_parsed = 0, g_no_ctab = 0;
 thread_local IDirect3DVertexShader9* t_active = nullptr;
+thread_local const ShaderFacts*     t_active_facts = nullptr;   // map nodes are pointer-stable
+unsigned g_ordinal = 0;
+
+// Length of the token stream in DWORDs, including the end token. Bounded the
+// same way find_ctab is.
+size_t token_count(const DWORD* code)
+{
+    if (!code) return 0;
+    constexpr size_t kMaxTokens = 1 << 20;
+    size_t i = 1;
+    while (i < kMaxTokens) {
+        const DWORD tok = code[i];
+        if (tok == 0x0000FFFF) return i + 1;
+        if ((tok & 0x0000FFFF) == 0x0000FFFE) { i += ((tok >> 16) & 0x7FFF) + 1; continue; }
+        ++i;
+    }
+    return kMaxTokens;
+}
+
+unsigned long long fnv1a(const void* data, size_t bytes)
+{
+    const unsigned char* p = static_cast<const unsigned char*>(data);
+    unsigned long long h = 1469598103934665603ull;
+    for (size_t i = 0; i < bytes; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
 
 // Walk the token stream looking for the CTAB comment. Comment tokens are
 // 0x0000FFFE in the low word, length in DWORDs in bits 16..30.
@@ -107,21 +135,28 @@ void on_create_vertex_shader(const DWORD* bytecode, IDirect3DVertexShader9* shad
     size_t bytes_available = 0;
     const CtabHeader* ctab = find_ctab(bytecode, bytes_available);
 
+    ShaderFacts facts;
+    facts.bytes = static_cast<unsigned>(token_count(bytecode) * sizeof(DWORD));
+    facts.hash  = fnv1a(bytecode, facts.bytes);
+
     std::lock_guard<std::mutex> lock(g_mutex);
+    facts.ordinal = ++g_ordinal;
 
     if (!ctab || bytes_available < sizeof(CtabHeader)) {
         ++g_no_ctab;
-        g_shaders[shader];   // known, but empty
+        g_shaders[shader].facts = facts;   // known, but no constant table
         return;
     }
 
     ShaderInfo info;
+    info.facts = facts;
+    info.facts.has_ctab = true;
     const auto* consts = reinterpret_cast<const ConstantInfo*>(
         reinterpret_cast<const char*>(ctab) + ctab->constant_info);
 
     // Bounds-check the constant array as a whole before reading entries.
     const size_t needed = ctab->constant_info + ctab->constants * sizeof(ConstantInfo);
-    if (needed > bytes_available) { ++g_no_ctab; g_shaders[shader]; return; }
+    if (needed > bytes_available) { ++g_no_ctab; g_shaders[shader].facts = facts; return; }
 
     for (DWORD c = 0; c < ctab->constants; ++c) {
         if (consts[c].register_set != 2) continue;   // float4 registers only
@@ -130,6 +165,16 @@ void on_create_vertex_shader(const DWORD* bytecode, IDirect3DVertexShader9* shad
 
         info.constants[name] = { consts[c].register_index, consts[c].register_count };
         g_name_spans[name].insert({ consts[c].register_index, consts[c].register_count });
+
+        // Skinning palette: the viewmodel (and every soldier) goes through
+        // these. Recorded as a fact for the draw classifier, never corrected.
+        if (std::strcmp(name, "boneMatrices") == 0 || std::strcmp(name, "boneVectors") == 0) {
+            info.facts.has_bones = true;
+            if (std::strcmp(name, "boneMatrices") == 0 || info.facts.bone_count == 0) {
+                info.facts.bone_start = consts[c].register_index;
+                info.facts.bone_count = consts[c].register_count;
+            }
+        }
 
         // A clip-space transform must be a full 4x4 - four registers. CTAB
         // shows viewMatrix spans of 2, which would be a packed partial matrix;
@@ -141,6 +186,7 @@ void on_create_vertex_shader(const DWORD* bytecode, IDirect3DVertexShader9* shad
         }
     }
 
+    info.facts.transform_span_count = static_cast<unsigned>(info.transform_span_count);
     g_shaders[shader] = std::move(info);
     ++g_parsed;
 }
@@ -148,7 +194,14 @@ void on_create_vertex_shader(const DWORD* bytecode, IDirect3DVertexShader9* shad
 void on_set_vertex_shader(IDirect3DVertexShader9* shader)
 {
     t_active = shader;
+    t_active_facts = nullptr;
+    if (!shader) return;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto it = g_shaders.find(shader);
+    if (it != g_shaders.end()) t_active_facts = &it->second.facts;
 }
+
+const ShaderFacts* active_facts() { return t_active_facts; }
 
 IDirect3DVertexShader9* active_shader() { return t_active; }
 
