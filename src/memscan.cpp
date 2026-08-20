@@ -277,7 +277,7 @@ float    g_fov_original = 0.0f;
 float*   g_vmfov_addr = nullptr;
 float    g_vmfov_original = 0.0f;
 enum class VmFovMode { Off, Fixed, Follow };
-VmFovMode g_vmfov_mode = VmFovMode::Follow;   // follow: keep the weapon FOV equal to the camera FOV
+VmFovMode g_vmfov_mode = VmFovMode::Off;      // follow did NOT fix the arms and loses the push; opt-in via vmfov
 float    g_vmfov_fixed_deg = 60.0f;
 unsigned g_vmfovfind_attempts = 0;
 bool     g_hunt_weapon = false;     // hunt verification signal: weapon tangents instead of world

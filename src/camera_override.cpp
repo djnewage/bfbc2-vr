@@ -40,7 +40,7 @@ float g_ref_pitch    = 0.0f;
 // Field-calibrated 2026-08-13: default signs were inverted on both axes
 // (user confirmed one F8 and one F6 press fixed look direction).
 float g_yaw_sign     = -1.0f;
-float g_pitch_sign   = -1.0f;
+float g_pitch_sign   = +1.0f;   // 2026-08-20: in-headset, -1 looked DOWN when looking up; F6 toggles
 float g_hmd_yaw      = 0.0f;    // current delta, radians
 float g_hmd_pitch    = 0.0f;
 
@@ -1035,6 +1035,12 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         return true;
     }
     if (!strcmp(cmd, "recenter")) { recenter(); _snprintf_s(reply, n, _TRUNCATE, "recentered"); return true; }
+    if (!strcmp(cmd, "pitchsign") || !strcmp(cmd, "yawsign")) {
+        float& sgn = (cmd[0] == 'p') ? g_pitch_sign : g_yaw_sign;
+        if (has1) sgn = (atof(a1) < 0) ? -1.0f : 1.0f;
+        _snprintf_s(reply, n, _TRUNCATE, "%s = %+.0f", cmd, sgn);
+        return true;
+    }
     if (!strcmp(cmd, "correct")) {
         if (has1) { g_correct_on = on; g_user_disabled = !on; }
         _snprintf_s(reply, n, _TRUNCATE, "correction %s", g_correct_on ? "on" : "off");

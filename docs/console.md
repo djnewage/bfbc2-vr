@@ -65,3 +65,19 @@ data pointed into the object's neighbourhood — the lead for a fixed pointer pa
 
 Known cost: while held, the game's own zoom (ADS) cannot change the FOV; scopes need their
 own treatment (BFVR: projection scale + eye-filling reticle quad).
+
+## Session results (2026-08-20, late)
+
+- **In-headset, engine FOV held at the Index's 109° vertical**: full field, no border, no void,
+  world holds still when leaning, stereo depth sane. Pitch was inverted → default sign flipped
+  (`pitchsign`/`yawsign` commands, F6/F8 keys).
+- Camera object: vtable `0x014755C8`, base seen at `0x1BF90648` (same address across three
+  launches — allocation looks deterministic), **FOV at +0x50** (the only live field; +0x78 mirrors
+  it, +0x7C holds 45.1, +0x60/+0x70 hold the base 55 = settings FOV; 45.1 = 55 × 0.82 infantry
+  multiplier; none of those drive the render).
+- Weapon FOV: `0x11A9F90C` = 30.0 (vertical), found by `fovfind 1.3 weapon` (poke → weapon
+  tangents exactly tan(19.5°)). Holding it equal to the camera FOV (`vmfov follow`) renders the
+  weapon natively wide but does **not** fix the stretched left arm and makes the weapon
+  unclassifiable (no push) — so it defaults to off.
+- Arm deformation: present at camera FOV ≥ 55 with our correction on; the decisive test (our
+  correction fully off at 109°) is still pending — the game was paused when it ran.
