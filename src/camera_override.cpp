@@ -208,17 +208,24 @@ bool  g_have_correction = false;
 
 
 // The game's native (un-widened) projection half-angle tangents, recovered
-// from VP: rows 0/1 are rotation rows scaled by the projection's x/y factors,
-// so tangent = 1/|row|.
+// from VP.
+//
+// BUG FIXED 2026-08-20: this used the ROWS of VP (1/|row|). In row-vector
+// math VP = V * P puts the projection factors in the COLUMNS: column 0 is
+// a * (V column 0), so |col0.xyz| = a exactly; a row mixes a, b and q with the
+// camera rotation, so the "tangent" drifted with head pitch/yaw (the log's
+// v=0.41..0.98 while "standing still" - read at the time as the game animating
+// its FOV). While K was dead that only breathed the compositor bounds; once K
+// went live it scaled the render as well, and the world warped with every head
+// movement. The column recovery is the same one draw_policy uses per draw.
 bool base_tangents(float& th, float& tv)
 {
     if (!g_have_vp) return false;
-    const float lx = std::sqrt(g_vp[0]*g_vp[0] + g_vp[1]*g_vp[1] + g_vp[2]*g_vp[2]);
-    const float ly = std::sqrt(g_vp[4]*g_vp[4] + g_vp[5]*g_vp[5] + g_vp[6]*g_vp[6]);
-    if (lx < 1e-6f || ly < 1e-6f) return false;
-    th = 1.0f / lx;
-    tv = 1.0f / ly;
-    return true;
+    drawpolicy::ProjParams p;
+    if (!drawpolicy::recover_projection(g_vp, p)) return false;
+    th = p.tan_half_h();
+    tv = p.tan_half_v();
+    return th > 1e-6f && tv > 1e-6f;
 }
 
 // Match the rendered field to the headset's frustum, per axis. Recomputed
