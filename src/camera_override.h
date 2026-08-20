@@ -75,6 +75,8 @@ bool command(const char* cmd, const char* args, char* reply, size_t reply_size);
 void status(FILE* f);
 // The world projection's half-angle tangents recovered from VP this frame.
 bool world_tangents(float& tan_half_h, float& tan_half_v);
+// The first-person weapon's own projection (last VIEWMODEL-classified write).
+bool weapon_tangents(float& tan_half_h, float& tan_half_v);
 // The headset's required half-angle tangents (max over both eyes), from
 // GetProjectionRaw. False until the VR system is up.
 bool headset_tangents(float& tan_half_h, float& tan_half_v);

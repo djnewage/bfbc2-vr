@@ -178,6 +178,8 @@ int   g_vm_mode   = 2;       // weapon projection: 0 own P, 1 own P, 2 hybrid (w
 bool  g_ownproj_on = true;   // Shift+']' toggles, for A/B against the old global-only path
 drawpolicy::Thresholds g_vm_th;
 drawpolicy::ProjParams g_world_proj;      // recovered from VP once per frame
+drawpolicy::ProjParams g_weapon_proj;     // the viewmodel's own P (last classified write)
+unsigned g_weapon_proj_frame = 0;
 float g_cview[16] = {};                   // V^-1 * r * V: the frame's correction in view space
 bool  g_have_cview = false;
 unsigned g_vm_hits = 0, g_vm_hits_last = 0;          // classified writes per frame
@@ -607,6 +609,7 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
             const drawpolicy::DrawClass cls = drawpolicy::classify(sig, g_vm_th);
             if (cls == drawpolicy::DrawClass::Viewmodel) {
                 ++g_vm_hits;
+                g_weapon_proj = p; g_weapon_proj_frame = g_frame_index;
                 const float* vm = viewmodel_correction(p, true);
                 if (vm) corr = vm;
             } else if (persp) {
@@ -968,6 +971,14 @@ bool headset_tangents(float& tan_half_h, float& tan_half_v)
     return true;
 }
 
+bool weapon_tangents(float& tan_half_h, float& tan_half_v)
+{
+    if (!g_weapon_proj.perspective || g_frame_index - g_weapon_proj_frame > 120) return false;
+    tan_half_h = g_weapon_proj.tan_half_h();
+    tan_half_v = g_weapon_proj.tan_half_v();
+    return true;
+}
+
 bool world_tangents(float& tan_half_h, float& tan_half_v)
 {
     if (!g_world_proj.perspective) return false;
@@ -1045,6 +1056,10 @@ void status(FILE* f)
             g_fov_auto ? 1 : 0, g_fov_manual, g_fov_widen_x, g_fov_widen_y,
             g_world_proj.tan_half_h(), g_world_proj.tan_half_v(), g_world_proj.near_z(), g_world_proj.far_z(),
             2.0f * std::atan(g_world_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_world_proj.tan_half_v()) * 180.0f / kPi);
+    fprintf(f, "weapon P: tan=%.4f/%.4f (deg %.1f x %.1f) near=%.3f\n",
+            g_weapon_proj.tan_half_h(), g_weapon_proj.tan_half_v(),
+            2.0f * std::atan(g_weapon_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_weapon_proj.tan_half_v()) * 180.0f / kPi,
+            g_weapon_proj.near_z());
     fprintf(f, "viewmodel: mode=%d push=%.2f ownproj=%d require_bones=%d  VIEWMODEL writes=%u own-P writes=%u\n",
             g_vm_mode, g_vm_push, g_ownproj_on ? 1 : 0, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last);
     fprintf(f, "vm-hist view-space <0.1:%u <0.5:%u <1:%u <2:%u <5:%u >5:%u\n",

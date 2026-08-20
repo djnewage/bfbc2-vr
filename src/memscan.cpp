@@ -201,6 +201,21 @@ void send_key(WORD vk, bool down)
 // tangents. 'fov auto' then holds it at the headset's vertical field.
 float*   g_fov_addr = nullptr;
 float    g_fov_original = 0.0f;
+
+// The same for the first-person weapon's own FOV (the arms deform when the
+// camera FOV departs from it - the engine's arm IK relates the two).
+float*   g_vmfov_addr = nullptr;
+float    g_vmfov_original = 0.0f;
+enum class VmFovMode { Off, Fixed, Follow };
+VmFovMode g_vmfov_mode = VmFovMode::Follow;   // follow: keep the weapon FOV equal to the camera FOV
+float    g_vmfov_fixed_deg = 60.0f;
+unsigned g_vmfovfind_attempts = 0;
+bool     g_hunt_weapon = false;     // hunt verification signal: weapon tangents instead of world
+
+bool hunt_tangents(float& th, float& tv)
+{
+    return g_hunt_weapon ? camover::weapon_tangents(th, tv) : camover::world_tangents(th, tv);
+}
 enum class FovMode { Off, Fixed, Auto };
 FovMode  g_fov_mode = FovMode::Auto;     // auto: headset-matched once the address is known
 float    g_fov_fixed_deg = 100.0f;
@@ -274,7 +289,7 @@ float encode(size_t i, float th, float tv)
 void hunt_begin(float factor, bool deg_v_only = false)
 {
     float th, tv;
-    if (!camover::world_tangents(th, tv)) { VRLOG("[hunt] no world projection yet - load into a level first"); return; }
+    if (!hunt_tangents(th, tv)) { VRLOG("[hunt] no %s projection yet - load into a level first", g_hunt_weapon ? "weapon" : "world"); return; }
     if (g_hunt_phase >= 0) { VRLOG("[hunt] already running"); return; }
     g_hunt_factor = factor;
     g_hunt_sets.clear();
@@ -293,7 +308,7 @@ void hunt_begin(float factor, bool deg_v_only = false)
         }
         g_cands.clear();
         g_hunt_i = 0; g_hunt_phase = 0; g_hunt_frames_total = 0;
-        VRLOG("[fovfind] vertical FOV %.3f deg: %zu candidates, poke-verifying (x%.2f, ~%.0f s)", deg_v, g_hunt.size(), factor, g_hunt.size() * (kHuntWait + 2) / 60.0f);
+        VRLOG("[fovfind] %s vertical FOV %.3f deg: %zu candidates, poke-verifying (x%.2f, ~%.0f s)", g_hunt_weapon ? "WEAPON" : "camera", deg_v, g_hunt.size(), factor, g_hunt.size() * (kHuntWait + 2) / 60.0f);
         return;
     }
     g_hunt_sets = {
@@ -454,13 +469,19 @@ void hunt_tick()
                     const float wb   = std::tan(0.5f * best->original * g_hunt_sets[best->set].factor * kPi / 180.0f);
                     if (std::fabs(got / want - 1.0f) < std::fabs(best->tv_after / wb - 1.0f)) best = &h;
                 }
-                g_fov_addr = best->addr;
-                g_fov_original = best->original;
-                VRLOG("[fovfind] ENGINE FOV ADDRESS %p (%s), original %.3f deg - '%s' mode active",
-                      g_fov_addr, where(g_fov_addr), g_fov_original,
-                      g_fov_mode == FovMode::Auto ? "auto" : g_fov_mode == FovMode::Fixed ? "fixed" : "off");
+                if (g_hunt_weapon) {
+                    g_vmfov_addr = best->addr;
+                    g_vmfov_original = best->original;
+                    VRLOG("[fovfind] WEAPON FOV ADDRESS %p (%s), original %.3f deg", g_vmfov_addr, where(g_vmfov_addr), g_vmfov_original);
+                } else {
+                    g_fov_addr = best->addr;
+                    g_fov_original = best->original;
+                    VRLOG("[fovfind] ENGINE FOV ADDRESS %p (%s), original %.3f deg - '%s' mode active",
+                          g_fov_addr, where(g_fov_addr), g_fov_original,
+                          g_fov_mode == FovMode::Auto ? "auto" : g_fov_mode == FovMode::Fixed ? "fixed" : "off");
+                }
             } else {
-                VRLOG("[fovfind] no candidate moved the projection (attempt %u)", g_fovfind_attempts);
+                VRLOG("[fovfind] no candidate moved the %s projection (attempt %u)", g_hunt_weapon ? "weapon" : "world", g_hunt_weapon ? g_vmfovfind_attempts : g_fovfind_attempts);
             }
         }
         return;
@@ -468,7 +489,7 @@ void hunt_tick()
     ++g_hunt_frames_total;
     HuntCand& c = g_hunt[g_hunt_i];
     if (g_hunt_phase == 0) {
-        camover::world_tangents(g_base_th, g_base_tv);
+        hunt_tangents(g_base_th, g_base_tv);
         float cur;
         if (!read_float(c.addr, cur) || std::fabs(cur - c.original) > std::fabs(c.original) * 0.01f + 1e-5f) {
             // Value moved since the scan - not a stable setting; skip.
@@ -482,7 +503,7 @@ void hunt_tick()
 
     // Check and restore.
     float th, tv;
-    const bool have = camover::world_tangents(th, tv);
+    const bool have = hunt_tangents(th, tv);
     write_float(c.addr, c.original);
     if (have && g_base_th > 0.0f &&
         (std::fabs(th / g_base_th - 1.0f) > 0.05f || std::fabs(tv / g_base_tv - 1.0f) > 0.05f)) {
@@ -617,8 +638,9 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         return true;
     }
     if (!strcmp(cmd, "fovfind")) {
+        g_hunt_weapon = has2 && !_stricmp(a2, "weapon");
         g_fovfind_pending = true;
-        ++g_fovfind_attempts;
+        if (g_hunt_weapon) ++g_vmfovfind_attempts; else ++g_fovfind_attempts;
         hunt_begin(has1 ? static_cast<float>(atof(a1)) : 1.3f, true);
         _snprintf_s(reply, n, _TRUNCATE, "fovfind started (%zu candidates)", g_hunt.size());
         return true;
@@ -642,6 +664,20 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         }
         _snprintf_s(reply, n, _TRUNCATE, "fov: addr=%p mode=%s fixed=%.1f orig=%.2f", static_cast<void*>(g_fov_addr),
                     g_fov_mode == FovMode::Auto ? "auto" : g_fov_mode == FovMode::Fixed ? "fixed" : "off", g_fov_fixed_deg, g_fov_original);
+        return true;
+    }
+    if (!strcmp(cmd, "vmfov")) {
+        if (!has1) {
+            _snprintf_s(reply, n, _TRUNCATE, "vmfov: addr=%p mode=%s fixed=%.1f orig=%.2f", static_cast<void*>(g_vmfov_addr),
+                        g_vmfov_mode == VmFovMode::Follow ? "follow" : g_vmfov_mode == VmFovMode::Fixed ? "fixed" : "off", g_vmfov_fixed_deg, g_vmfov_original);
+            return true;
+        }
+        if (!_stricmp(a1, "follow")) g_vmfov_mode = VmFovMode::Follow;
+        else if (!_stricmp(a1, "off")) { g_vmfov_mode = VmFovMode::Off; if (g_vmfov_addr) write_float(g_vmfov_addr, g_vmfov_original); }
+        else if (!_stricmp(a1, "addr") && has2) { g_vmfov_addr = parse_addr(a2); read_float(g_vmfov_addr, g_vmfov_original); }
+        else { g_vmfov_mode = VmFovMode::Fixed; g_vmfov_fixed_deg = (std::min)((std::max)(static_cast<float>(atof(a1)), 10.0f), 150.0f); }
+        _snprintf_s(reply, n, _TRUNCATE, "vmfov: addr=%p mode=%s fixed=%.1f orig=%.2f", static_cast<void*>(g_vmfov_addr),
+                    g_vmfov_mode == VmFovMode::Follow ? "follow" : g_vmfov_mode == VmFovMode::Fixed ? "fixed" : "off", g_vmfov_fixed_deg, g_vmfov_original);
         return true;
     }
     if (!strcmp(cmd, "hunt2")) {
@@ -704,6 +740,27 @@ void on_present()
         ++g_fovfind_attempts;
         hunt_begin(1.3f, true);
     }
+    // Weapon FOV: locate after the camera FOV is known, then hold (follow/fixed).
+    float wth, wtv;
+    const bool have_weapon = camover::weapon_tangents(wth, wtv);
+    if (g_fov_addr && !g_vmfov_addr && g_vmfov_mode != VmFovMode::Off && have_weapon &&
+        g_hunt_phase < 0 && g_h2_phase < 0 && g_vmfovfind_attempts < 2 && (g_fov_stable_frames % 900) == 450) {
+        VRLOG("[fovfind] auto-locating the WEAPON FOV (attempt %u)...", g_vmfovfind_attempts + 1);
+        g_hunt_weapon = true;
+        g_fovfind_pending = true;
+        ++g_vmfovfind_attempts;
+        hunt_begin(1.3f, true);
+    }
+    if (g_vmfov_addr && g_vmfov_mode != VmFovMode::Off && g_hunt_phase < 0) {
+        float target = g_vmfov_fixed_deg;
+        if (g_vmfov_mode == VmFovMode::Follow) {
+            float cur = 0.0f;
+            if (g_fov_addr && read_float(g_fov_addr, cur) && cur > 5.0f) target = cur;
+            else target = g_vmfov_original;
+        }
+        write_float(g_vmfov_addr, (std::min)((std::max)(target, 10.0f), 150.0f));
+    }
+
     if (g_fov_addr && g_fov_mode != FovMode::Off && g_hunt_phase < 0) {
         float target = g_fov_fixed_deg;
         if (g_fov_mode == FovMode::Auto) {
@@ -727,6 +784,10 @@ void status(FILE* f)
         fprintf(f, "engine fov: addr=%p mode=%s fixed=%.1f original=%.2f current=%.2f attempts=%u\n",
                 static_cast<void*>(g_fov_addr), g_fov_mode == FovMode::Auto ? "auto" : g_fov_mode == FovMode::Fixed ? "fixed" : "off",
                 g_fov_fixed_deg, g_fov_original, ok ? cur : 0.0f, g_fovfind_attempts);
+        float vcur = 0.0f; const bool vok = g_vmfov_addr && read_float(g_vmfov_addr, vcur);
+        fprintf(f, "weapon fov: addr=%p mode=%s fixed=%.1f original=%.2f current=%.2f attempts=%u\n",
+                static_cast<void*>(g_vmfov_addr), g_vmfov_mode == VmFovMode::Follow ? "follow" : g_vmfov_mode == VmFovMode::Fixed ? "fixed" : "off",
+                g_vmfov_fixed_deg, g_vmfov_original, vok ? vcur : 0.0f, g_vmfovfind_attempts);
     }
     for (float* w : g_watches) {
         float v; const bool ok = read_float(w, v);
