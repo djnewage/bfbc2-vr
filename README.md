@@ -1,13 +1,66 @@
 # bfbc2-vr
 
-A 6DOF VR mod for **Battlefield: Bad Company 2** (Frostbite 1.5, 2010).
+A 6DOF VR mod for **Battlefield: Bad Company 2** (Frostbite 1.5, 2010) — stereo rendering,
+head tracking and roomscale leaning injected into a game with no VR support, no mod SDK and
+no source, through a `d3d9.dll` proxy on DXVK submitting to SteamVR.
 
-Goal: real roomscale VR — stereo rendering, 6DOF head tracking, and motion-controlled
-gun handling — injected into a game that has no VR support, no mod SDK, and no source.
+**Status — working today:**
 
-**Status:** Phase 0 (recon). Nothing built yet.
+- **Stereo + 6DOF head tracking** in the headset (alternate-eye rendering, IPD read from the
+  headset, lean/duck/peek at 1:1 world scale)
+- **Full headset field of view, rendered *and culled* by the engine.** The camera's own FOV
+  value is located in memory at runtime and held at the headset's vertical field, so there is
+  no black border, no theater window, and no missing geometry at the edges
+- **Per-draw projection correction.** Frostbite renders the scene in depth slices (near planes
+  at 0.1 / 7.48 / 21.34 m); each draw is corrected around its *own* recovered projection
+- **First-person weapon** identified by shader identity + its own field of view, corrected
+  separately, with the arms hidden (they intersect the eye at headset FOV)
+- **HUD on a floating panel** — HUD draws are redirected into a transparent render target and
+  shown as an OpenVR overlay in front of the player's aim direction, out of the world image
+- **A command channel** (`bfbc2vr_cmd.txt`) + status file + in-process memory scanner, so the
+  mod can be driven, measured and screenshotted without touching the keyboard
+
+**Not done yet:** motion-controlled gun handling (the real goal), ADS/scope handling, comfort
+options. See `docs/architecture.md` for the roadmap.
+
+Everything here was built by measurement rather than guesswork; the `docs/` folder is the
+evidence trail, including three bugs that survived weeks because nothing was verified against
+the game's own numbers (`docs/viewmodel-census.md` §4).
 
 ---
+
+## Requirements
+
+- Battlefield: Bad Company 2 (Steam), **singleplayer** — see the constraint below
+- A PC VR headset with SteamVR running **before** the game
+- [DXVK](https://github.com/doitsujin/dxvk) — drop its 32-bit `d3d9.dll` into the game folder
+  renamed to `dxvk_d3d9.dll`
+- Visual Studio 2022 build tools with CMake, and the
+  [OpenVR SDK](https://github.com/ValveSoftware/openvr) (see *Building*)
+
+## Building
+
+```powershell
+# 1. OpenVR: copy from the SDK into the repo (not vendored - Valve's binaries stay Valve's)
+#      thirdparty/openvr/lib/win32/openvr_api.lib
+#      thirdparty/openvr/bin/win32/openvr_api.dll
+# 2. Build (x86 - BFBC2Game.exe is 32-bit) and install into the game folder
+pwsh -File tools\build.ps1 -Install
+
+# Restore the game to stock at any time
+pwsh -File tools\build.ps1 -Uninstall
+```
+
+`tools\build.ps1 -GameDir "<path>"` if your install is not in the default Steam location.
+`tools\configure-dx9.ps1` forces the game's DX9 path and sets a VR-friendly resolution.
+Unit tests for the pure math: `ctest --test-dir build -C Release`.
+
+## Using it
+
+Launch SteamVR, then the game, then load a singleplayer mission. The mod engages by itself:
+it finds the engine's FOV a few seconds after the world appears and matches it to the headset.
+**F5** recenters (face the way your body is aiming). `docs/console.md` lists every key and
+every command; `docs/viewmodel-census.md` explains the rendering decisions.
 
 ## Why this is possible
 
@@ -37,10 +90,24 @@ shut down 2023-12-08; community multiplayer now runs on
 ## Layout
 
 ```
-docs/recon.md          verified facts about the target binary + environment
-docs/architecture.md   technical design and phased roadmap
-tools/recon.ps1        re-runnable environment probe
+src/                  the proxy DLL (x86)
+  camera_override     the correction: per-draw projection, head pose, eyes, viewmodel
+  draw_policy         pure classification + correction math (unit-tested)
+  draw_diag           the draw-signature census behind every decision here
+  vr_compositor       DXVK->Vulkan interop, eye submission, the HUD overlay
+  memscan             in-process scanner + the autonomous engine-FOV hunt
+  console             file-driven command channel and status dump
+docs/architecture.md  design and phased roadmap
+docs/console.md       commands, status file, and how the FOV was found
+docs/viewmodel-census.md   what the draw census proved, and the bugs it caught
+docs/prior-art-bfvr.md     what transfers from the shipped BF1942 VR mod
+tools/                build/install, DXVK, settings, and recon scripts
 ```
+
+## Licence
+
+MIT — see `LICENSE`. Third-party headers under `thirdparty/` keep their own licences
+(OpenVR: BSD-3-Clause, Vulkan: Apache-2.0, DXVK interop header: zlib).
 
 ## Prior art / reference index
 

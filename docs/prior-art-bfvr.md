@@ -1,8 +1,7 @@
 # Prior art: BFVR (Battlefield 1942 VR) — what transfers to us
 
 Reviewed 2026-08-20 against BFVR at commit `dd48c87` (v1.0.1, 2026-08-12).
-Source: https://github.com/JayBiggsGMG/BFVR-Battlefield-1942-VR-Mod — local clone at
-`C:\Users\djnew\bfvr-reference` (read-only reference; not vendored). Their own
+Source: https://github.com/JayBiggsGMG/BFVR-Battlefield-1942-VR-Mod — cloned locally as a read-only reference; not vendored here. Their own
 continuation guide is `docs/AI_DEVELOPER_HANDOFF.md`; the evidence record is
 `devREADME.md` and `docs/first-person-arms-research.md`.
 
@@ -11,6 +10,11 @@ D3D8 fixed-function game → patched d3d8to9 → x86 client DLL injected by a la
 shared textures → **x64 OpenXR presenter process** — and it leans heavily on
 **engine-level hooks** (MinHook on functions found with Ghidra). So its code does not
 port. Its *decisions* do, and several answer exactly what our last commits were stuck on.
+
+**Note:** the "Us" column below is a snapshot from the moment of review. Several rows were
+answered the same day and no longer describe the mod — culling, viewmodel identity, per-draw
+projection and the HUD in particular. See `viewmodel-census.md` and `console.md` for where
+each one landed.
 
 ## Side by side
 

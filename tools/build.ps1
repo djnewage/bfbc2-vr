@@ -11,14 +11,15 @@ param(
     [ValidateSet('Debug','Release')][string]$Config = 'Release',
     [switch]$Install,
     [switch]$Uninstall,
-    [switch]$Clean
+    [switch]$Clean,
+    # Override if the game is not in the default Steam location.
+    [string]$GameDir = "C:\Program Files (x86)\Steam\steamapps\common\Battlefield Bad Company 2"
 )
 
 $ErrorActionPreference = 'Stop'
 
 $Root     = Split-Path $PSScriptRoot -Parent
 $Build    = Join-Path $Root 'build'
-$GameDir  = "C:\Program Files (x86)\Steam\steamapps\common\Battlefield Bad Company 2"
 $Target   = Join-Path $GameDir 'd3d9.dll'
 $DxvkName = Join-Path $GameDir 'dxvk_d3d9.dll'
 
