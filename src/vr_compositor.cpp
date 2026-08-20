@@ -37,9 +37,13 @@ IDirect3DTexture9*     g_hud_tex[2]     = {};
 ID3D9VkInteropTexture* g_hud_interop[2] = {};
 int      g_hud_cur = 0;
 vr::VROverlayHandle_t g_hud_handle = vr::k_ulOverlayHandleInvalid;
-bool     g_hud_enabled = false;   // opt-in via 'hud on' until proven in a level
-float    g_hud_dist = 1.5f;     // metres in front of the body direction
+bool     g_hud_enabled = true;    // gate proven in-level 2026-08-20; 'hud off' disables
+float    g_hud_dist = 1.5f;     // metres in front of the chosen direction
 float    g_hud_width = 1.6f;    // metres; height follows the texture aspect
+float    g_hud_height = 0.0f;   // metres above eye level
+bool     g_hud_head_locked = false;   // false = body/aim yaw, true = follows the gaze
+float    g_hud_alpha = 1.0f;
+bool     g_hud_alpha_additive = true; // accumulate coverage aggressively
 bool     g_hud_redirected = false;
 IDirect3DSurface9* g_hud_saved_rt = nullptr;
 unsigned g_hud_draws = 0, g_hud_draws_last = 0;
@@ -140,7 +144,7 @@ bool init_hud()
             VRLOG("[hud] CreateOverlay failed: %d", (int)err); g_hud_failed = true; return false;
         }
         vr::VROverlay()->SetOverlayWidthInMeters(g_hud_handle, g_hud_width);
-        vr::VROverlay()->SetOverlayAlpha(g_hud_handle, 1.0f);
+        vr::VROverlay()->SetOverlayAlpha(g_hud_handle, g_hud_alpha);
         vr::VROverlay()->SetOverlayInputMethod(g_hud_handle, vr::VROverlayInputMethod_None);
         vr::VROverlay()->ShowOverlay(g_hud_handle);
         VRLOG("[hud] overlay created (%ux%u, %.2f m wide at %.2f m)", g_width, g_height, g_hud_width, g_hud_dist);
@@ -157,16 +161,23 @@ void release_hud_textures()
     }
 }
 
-// Overlay pose: in front of the BODY direction (the HMD reference captured at
-// recenter), in the standing tracking space. Yaw/pitch are in the convention
-// of camover::hmd_yaw_pitch (yaw 0 = -Z, positive toward -X; pitch up positive).
+// Overlay pose. YAW ONLY, at the head's current position, upright.
+//
+// The first attempt used the recenter reference pose outright - including its
+// pitch and the position the head was at then - and the panel ended up parked
+// low and off to one side ("I only see it when I lean toward my gun",
+// 2026-08-20). What is wanted is a panel at eye height, at the BODY's yaw
+// (so it stays with the aim while the head looks around), in front of wherever
+// the head is now. 'hud head' switches to gaze-locked instead.
 void update_hud_transform()
 {
     float yaw = 0.0f, pitch = 0.0f, pos[3] = {};
-    if (!camover::body_frame(yaw, pitch, pos)) return;
-    const float cy = std::cos(yaw), sy = std::sin(yaw), cp = std::cos(pitch), sp = std::sin(pitch);
-    // forward in OpenVR space
-    const float f[3] = { sy * cp, sp, -cy * cp };
+    const bool ok = g_hud_head_locked ? camover::head_frame(yaw, pitch, pos)
+                                      : camover::body_frame(yaw, pitch, pos);
+    if (!ok) return;
+    const float cy = std::cos(yaw), sy = std::sin(yaw);
+    // Forward with pitch dropped: the panel is always upright at eye height.
+    const float f[3] = { sy, 0.0f, -cy };
     // overlay local +Z faces the viewer: z = -f; x = up x z; y = z x x
     float z[3] = { -f[0], -f[1], -f[2] };
     const float up[3] = { 0.0f, 1.0f, 0.0f };
@@ -177,7 +188,7 @@ void update_hud_transform()
     vr::HmdMatrix34_t m = {};
     for (int r = 0; r < 3; ++r) {
         m.m[r][0] = x[r]; m.m[r][1] = y[r]; m.m[r][2] = z[r];
-        m.m[r][3] = pos[r] + f[r] * g_hud_dist;
+        m.m[r][3] = pos[r] + f[r] * g_hud_dist + (r == 1 ? g_hud_height : 0.0f);
     }
     vr::VROverlay()->SetOverlayTransformAbsolute(g_hud_handle, vr::TrackingUniverseStanding, &m);
 }
@@ -188,11 +199,12 @@ void update_hud_transform()
 void save_eye_bmps()
 {
     static int shot = 0;
-    for (int e = 0; e < 2; ++e) {
-        if (!g_eye_tex[e]) continue;
+    for (int e = 0; e < 3; ++e) {   // 0,1 = eyes; 2 = the HUD overlay texture
+        IDirect3DTexture9* tex = (e < 2) ? g_eye_tex[e] : g_hud_tex[g_hud_cur ^ 1];
+        if (!tex) continue;
 
         IDirect3DSurface9* src = nullptr;
-        if (FAILED(g_eye_tex[e]->GetSurfaceLevel(0, &src)) || !src) continue;
+        if (FAILED(tex->GetSurfaceLevel(0, &src)) || !src) continue;
 
         IDirect3DSurface9* sys = nullptr;
         if (FAILED(g_device->CreateOffscreenPlainSurface(g_width, g_height, D3DFMT_A8R8G8B8,
@@ -205,7 +217,7 @@ void save_eye_bmps()
             if (SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
                 char path[MAX_PATH];
                 _snprintf_s(path, sizeof(path), _TRUNCATE, "%sbfbc2vr_eye%c_%02d.bmp",
-                            vrlog::module_dir().c_str(), e == 0 ? 'L' : 'R', shot);
+                            vrlog::module_dir().c_str(), e == 0 ? 'L' : (e == 1 ? 'R' : 'H'), shot);
                 FILE* f = nullptr;
                 fopen_s(&f, path, "wb");
                 if (f) {
@@ -528,6 +540,7 @@ bool submit_frame()
         }
         update_hud_transform();
         vr::VROverlay()->SetOverlayWidthInMeters(g_hud_handle, g_hud_width);
+        vr::VROverlay()->SetOverlayAlpha(g_hud_handle, g_hud_alpha);
         if (g_hud_enabled) vr::VROverlay()->ShowOverlay(g_hud_handle); else vr::VROverlay()->HideOverlay(g_hud_handle);
     }
     g_hud_draws_last = g_hud_draws; g_hud_draws = 0;
@@ -586,11 +599,13 @@ void hud_begin_draw()
     }
     g_hud_saved_rt = cur;   // keep the reference until restore
     g_hud_redirected = true;
-    // Alpha must ACCUMULATE coverage for the overlay: separate alpha blend
-    // ONE / INVSRCALPHA while colour keeps the game's own blend.
+    // Alpha must ACCUMULATE coverage for the overlay while colour keeps the
+    // game's own blend. INVSRCALPHA was too timid - HUD elements whose pixel
+    // shader writes a small alpha left the panel barely visible ("faint",
+    // 2026-08-20) - so the default is additive saturation.
     g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
     g_device->SetRenderState(D3DRS_SRCBLENDALPHA, D3DBLEND_ONE);
-    g_device->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
+    g_device->SetRenderState(D3DRS_DESTBLENDALPHA, g_hud_alpha_additive ? D3DBLEND_ONE : D3DBLEND_INVSRCALPHA);
 }
 
 void hud_end_draw()
@@ -632,9 +647,15 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
             else if (!_stricmp(a1, "off")) { g_hud_enabled = false; hud_end_draw(); if (g_hud_handle != vr::k_ulOverlayHandleInvalid && vr::VROverlay()) vr::VROverlay()->HideOverlay(g_hud_handle); }
             else if (!_stricmp(a1, "dist") && a2[0]) g_hud_dist = (std::min)((std::max)(static_cast<float>(atof(a2)), 0.3f), 10.0f);
             else if (!_stricmp(a1, "width") && a2[0]) g_hud_width = (std::min)((std::max)(static_cast<float>(atof(a2)), 0.2f), 10.0f);
+            else if (!_stricmp(a1, "height") && a2[0]) g_hud_height = (std::min)((std::max)(static_cast<float>(atof(a2)), -2.0f), 2.0f);
+            else if (!_stricmp(a1, "alpha") && a2[0]) g_hud_alpha = (std::min)((std::max)(static_cast<float>(atof(a2)), 0.05f), 1.0f);
+            else if (!_stricmp(a1, "head")) g_hud_head_locked = true;
+            else if (!_stricmp(a1, "body")) g_hud_head_locked = false;
+            else if (!_stricmp(a1, "additive")) g_hud_alpha_additive = !a2[0] || !!atoi(a2);
         }
-        _snprintf_s(reply, n, _TRUNCATE, "hud %s dist=%.2f width=%.2f draws/frame=%u submits=%u%s",
-                    g_hud_enabled ? "on" : "off", g_hud_dist, g_hud_width, g_hud_draws_last, g_hud_submits, g_hud_failed ? " FAILED" : "");
+        _snprintf_s(reply, n, _TRUNCATE, "hud %s %s dist=%.2f width=%.2f height=%.2f alpha=%.2f additive=%d draws/frame=%u submits=%u%s",
+                    g_hud_enabled ? "on" : "off", g_hud_head_locked ? "head" : "body", g_hud_dist, g_hud_width,
+                    g_hud_height, g_hud_alpha, g_hud_alpha_additive ? 1 : 0, g_hud_draws_last, g_hud_submits, g_hud_failed ? " FAILED" : "");
         return true;
     }
     if (!strcmp(cmd, "vr")) {
@@ -650,8 +671,9 @@ void status(FILE* f)
 {
     fprintf(f, "compositor: scene=%d interop=%d enabled=%d backbuffer=%ux%u submits=%u\n",
             g_scene_ok ? 1 : 0, g_interop_ok ? 1 : 0, g_enabled ? 1 : 0, g_width, g_height, g_submits);
-    fprintf(f, "hud: %s dist=%.2f width=%.2f draws/frame=%u submits=%u%s\n",
-            g_hud_enabled ? "on" : "off", g_hud_dist, g_hud_width, g_hud_draws_last, g_hud_submits, g_hud_failed ? " FAILED" : "");
+    fprintf(f, "hud: %s %s dist=%.2f width=%.2f height=%.2f alpha=%.2f additive=%d draws/frame=%u submits=%u%s\n",
+            g_hud_enabled ? "on" : "off", g_hud_head_locked ? "head" : "body", g_hud_dist, g_hud_width,
+            g_hud_height, g_hud_alpha, g_hud_alpha_additive ? 1 : 0, g_hud_draws_last, g_hud_submits, g_hud_failed ? " FAILED" : "");
 }
 void backbuffer_size(unsigned& w, unsigned& h) { w = g_width; h = g_height; }
 

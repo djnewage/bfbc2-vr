@@ -752,7 +752,15 @@ bool body_frame(float& yaw, float& pitch, float pos[3])
 {
     if (!g_hmd_active) return false;
     yaw = g_ref_yaw; pitch = g_ref_pitch;
-    pos[0] = g_ref_pos[0]; pos[1] = g_ref_pos[1]; pos[2] = g_ref_pos[2];
+    vrtrack::position(pos);          // anchor at the head's CURRENT position
+    return true;
+}
+
+bool head_frame(float& yaw, float& pitch, float pos[3])
+{
+    if (!vrtrack::have_pose()) return false;
+    hmd_yaw_pitch(yaw, pitch);
+    vrtrack::position(pos);
     return true;
 }
 

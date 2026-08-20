@@ -71,6 +71,8 @@ constexpr unsigned kCamWorldBase = 189;   // c189..c192, camera-to-world
 int on_draw(const void* return_address, bool indexed, unsigned prim_count);
 // The body frame in tracking space: the HMD reference captured at recenter.
 bool body_frame(float& yaw, float& pitch, float pos[3]);
+// The live head frame in tracking space (current pose).
+bool head_frame(float& yaw, float& pitch, float pos[3]);
 
 // Command channel (console.h): widen/auto/mode/push/ownproj/bones/recenter/fov.
 // Returns true if handled; reply goes to `reply`.
