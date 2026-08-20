@@ -89,6 +89,8 @@ view-space distance histogram of all corrected writes.
 | DELETE or `[` | cycle viewmodel projection mode 0→1→2→3 |
 | Shift + (DELETE or `[`) | toggle classifier bone requirement |
 | `-` / `=` | viewmodel push −/+ 0.05 m |
+| PgUp / PgDn | manual FOV widen ±0.05 (default 1.0) |
+| Shift+PgUp | toggle automatic headset FOV match (engine-cull void beyond ~58°×45°) |
 
 ## 4. Census result (2026-08-20, same day): the depth-slice finding
 
@@ -113,3 +115,18 @@ within 2 % so a non-rigid World cannot leak into the field; `q/t` are always the
 
 The weapon (bone shaders, own FOV tan 0.357/0.268) is the only class that also gets an offset;
 default mode is now **2 (hybrid)**: world field of view, weapon's own depth range.
+
+## 5. Engine culling: the widen trick hits its wall
+
+User screenshot (mirror, auto widen 2.6×/3.4× live): gray void over most of the image — the
+engine culls objects against its own ~58°×45° frustum, so everything the widened render
+would show beyond that cone (sky segments, terrain patches, trees) is never drawn.
+`settings.ini Fov=90` has **no effect** (tangents identical at 55 and 90). Before today the
+dead `K` hid this by magnifying a native image.
+
+Decision: auto widen **off by default** (correct geometry in a theater window); PgUp/PgDn
+manual, Shift+PgUp toggles auto. The real fix is engine-level: make the game itself render
+*and cull* a headset-sized FOV. `BFBC2Game.exe` contains the reflection names `Fov`,
+`DefaultFOV`, `RenderFov`, `ZoomRenderFov`, `InfantryFOVMultiplier`, `ForceFov`,
+`FovModifier`, `CameraFov` — the starting points for the Ghidra/memory-patch track
+(BFVR's `RenderView::getFrustum` ×1.5 inflation is the pattern).
