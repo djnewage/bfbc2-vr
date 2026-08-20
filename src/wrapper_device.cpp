@@ -229,25 +229,25 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetRenderTarget(DWORD i, IDirect3DS
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawPrimitive(D3DPRIMITIVETYPE t, UINT s, UINT c)
 {
-    camover::on_draw(_ReturnAddress(), false, c);
+    if (camover::on_draw(_ReturnAddress(), false, c)) return D3D_OK;
     return m_real->DrawPrimitive(t, s, c);
 }
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawIndexedPrimitive(D3DPRIMITIVETYPE t, INT b, UINT mi, UINT nv, UINT si, UINT pc)
 {
-    camover::on_draw(_ReturnAddress(), true, pc);
+    if (camover::on_draw(_ReturnAddress(), true, pc)) return D3D_OK;
     return m_real->DrawIndexedPrimitive(t, b, mi, nv, si, pc);
 }
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawPrimitiveUP(D3DPRIMITIVETYPE t, UINT c, const void* d, UINT st)
 {
-    camover::on_draw(_ReturnAddress(), false, c);
+    if (camover::on_draw(_ReturnAddress(), false, c)) return D3D_OK;
     return m_real->DrawPrimitiveUP(t, c, d, st);
 }
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE t, UINT mi, UINT nv, UINT pc, const void* id, D3DFORMAT idf, const void* vd, UINT vs)
 {
-    camover::on_draw(_ReturnAddress(), true, pc);
+    if (camover::on_draw(_ReturnAddress(), true, pc)) return D3D_OK;
     return m_real->DrawIndexedPrimitiveUP(t, mi, nv, pc, id, idf, vd, vs);
 }
 

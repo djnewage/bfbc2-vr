@@ -224,6 +224,25 @@ struct PendingWvp {
 };
 thread_local PendingWvp t_pending;
 
+// Hidden viewmodel shaders (by bytecode hash prefix): their draws are skipped
+// while the write was classified Viewmodel - the first-person arms reach
+// behind the near plane at headset FOV and slice into blades; a floating gun
+// is the VR convention and what the controller-held gun wants anyway.
+constexpr size_t kMaxHidden = 16;
+unsigned long long g_hide[kMaxHidden] = {};
+unsigned g_hide_bits[kMaxHidden] = {};   // number of hex digits given (prefix match)
+size_t g_hide_n = 0;
+unsigned g_hidden_draws = 0, g_hidden_draws_last = 0;
+
+bool hash_hidden(unsigned long long h)
+{
+    for (size_t i = 0; i < g_hide_n; ++i) {
+        const unsigned shift = 64 - g_hide_bits[i] * 4;
+        if ((h >> shift) == (g_hide[i] >> shift)) return true;
+    }
+    return false;
+}
+
 float g_correction[16] = {};   // VP^-1 * R * VP, rebuilt once per frame
 bool  g_have_correction = false;
 
@@ -667,13 +686,20 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
     return any;
 }
 
-void on_draw(const void* return_address, bool indexed, unsigned prim_count)
+bool on_draw(const void* return_address, bool indexed, unsigned prim_count)
 {
-    if (!drawdiag::capturing()) return;
-
-    drawdiag::Record rec;
     const shaderreg::ShaderFacts* facts = shaderreg::active_facts();
     const void* shader = shaderreg::active_shader();
+
+    // Hidden viewmodel shader? Only when THIS draw's write was the weapon.
+    if (g_hide_n && facts && t_pending.valid && t_pending.shader == shader &&
+        t_pending.cls == drawpolicy::DrawClass::Viewmodel && hash_hidden(facts->hash)) {
+        ++g_hidden_draws;
+        return true;
+    }
+    if (!drawdiag::capturing()) return false;
+
+    drawdiag::Record rec;
     rec.shader = shader;
     if (facts) {
         rec.shader_hash  = facts->hash;
@@ -697,6 +723,7 @@ void on_draw(const void* return_address, bool indexed, unsigned prim_count)
     rec.rt_is_backbuffer = g_rt_is_bb; rec.rt_w = g_rt_w; rec.rt_h = g_rt_h;
     rec.indexed = indexed; rec.prims = prim_count; rec.ret = return_address;
     drawdiag::on_draw(rec);
+    return false;
 }
 
 void note_render_state(unsigned state, unsigned value)
@@ -818,6 +845,7 @@ void on_present()
     static unsigned frames = 0;
     ++frames;
     g_vm_hits_last = g_vm_hits;  g_vm_hits = 0;
+    g_hidden_draws_last = g_hidden_draws; g_hidden_draws = 0;
     g_vm_ownp_last = g_vm_ownp;  g_vm_ownp = 0;
     std::memcpy(g_vm_hist_last, g_vm_hist, sizeof(g_vm_hist));
     std::memset(g_vm_hist, 0, sizeof(g_vm_hist));
@@ -1035,6 +1063,25 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         return true;
     }
     if (!strcmp(cmd, "recenter")) { recenter(); _snprintf_s(reply, n, _TRUNCATE, "recentered"); return true; }
+    if (!strcmp(cmd, "hide")) {
+        if (!has1 || g_hide_n >= kMaxHidden) { _snprintf_s(reply, n, _TRUNCATE, "usage: hide <hash-prefix-hex> (%zu/%zu used)", g_hide_n, kMaxHidden); return true; }
+        const size_t digits = strlen(a1) > 16 ? 16 : strlen(a1);
+        unsigned long long v = 0;
+        for (size_t i = 0; i < digits; ++i) {
+            const char c = a1[i];
+            const unsigned d = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : 0;
+            v = (v << 4) | d;
+        }
+        v <<= (64 - digits * 4);
+        g_hide[g_hide_n] = v; g_hide_bits[g_hide_n] = static_cast<unsigned>(digits); ++g_hide_n;
+        _snprintf_s(reply, n, _TRUNCATE, "hiding viewmodel shaders with hash prefix %s (%zu hidden)", a1, g_hide_n);
+        return true;
+    }
+    if (!strcmp(cmd, "unhide")) { g_hide_n = 0; _snprintf_s(reply, n, _TRUNCATE, "all shaders visible"); return true; }
+    if (!strcmp(cmd, "hidden")) {
+        _snprintf_s(reply, n, _TRUNCATE, "%zu hidden prefixes; %u draws hidden last frame", g_hide_n, g_hidden_draws_last);
+        return true;
+    }
     if (!strcmp(cmd, "pitchsign") || !strcmp(cmd, "yawsign")) {
         float& sgn = (cmd[0] == 'p') ? g_pitch_sign : g_yaw_sign;
         if (has1) sgn = (atof(a1) < 0) ? -1.0f : 1.0f;
@@ -1066,8 +1113,8 @@ void status(FILE* f)
             g_weapon_proj.tan_half_h(), g_weapon_proj.tan_half_v(),
             2.0f * std::atan(g_weapon_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_weapon_proj.tan_half_v()) * 180.0f / kPi,
             g_weapon_proj.near_z());
-    fprintf(f, "viewmodel: mode=%d push=%.2f ownproj=%d require_bones=%d  VIEWMODEL writes=%u own-P writes=%u\n",
-            g_vm_mode, g_vm_push, g_ownproj_on ? 1 : 0, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last);
+    fprintf(f, "viewmodel: mode=%d push=%.2f ownproj=%d require_bones=%d  VIEWMODEL writes=%u own-P writes=%u hidden=%u/%zu\n",
+            g_vm_mode, g_vm_push, g_ownproj_on ? 1 : 0, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last, g_hidden_draws_last, g_hide_n);
     fprintf(f, "vm-hist view-space <0.1:%u <0.5:%u <1:%u <2:%u <5:%u >5:%u\n",
             g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2], g_vm_hist_last[3], g_vm_hist_last[4], g_vm_hist_last[5]);
     fprintf(f, "camera eye=(%.2f %.2f %.2f) fwd=(%.3f %.3f %.3f)\n", g_eye[0], g_eye[1], g_eye[2], g_cam_rows[6], g_cam_rows[7], g_cam_rows[8]);
