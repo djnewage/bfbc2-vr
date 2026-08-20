@@ -66,7 +66,8 @@ constexpr unsigned kCamWorldBase = 189;   // c189..c192, camera-to-world
 // reports every draw with the game's call site; the render-state and
 // render-target shadows let the census key on z/alpha state and on whether
 // the draw lands in the backbuffer. All cheap no-ops unless a census is armed.
-void on_draw(const void* return_address, bool indexed, unsigned prim_count);
+// Returns true if the draw must be SKIPPED (hidden viewmodel shader).
+bool on_draw(const void* return_address, bool indexed, unsigned prim_count);
 
 // Command channel (console.h): widen/auto/mode/push/ownproj/bones/recenter/fov.
 // Returns true if handled; reply goes to `reply`.
