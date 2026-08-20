@@ -130,3 +130,13 @@ manual, Shift+PgUp toggles auto. The real fix is engine-level: make the game its
 `DefaultFOV`, `RenderFov`, `ZoomRenderFov`, `InfantryFOVMultiplier`, `ForceFov`,
 `FovModifier`, `CameraFov` — the starting points for the Ghidra/memory-patch track
 (BFVR's `RenderView::getFrustum` ×1.5 inflation is the pattern).
+
+## 6. Engine FOV + floating gun (2026-08-20, end of day)
+
+With the engine's own camera FOV held at the headset's vertical field (`docs/console.md`), the
+first-person **arms** reach behind the near plane and render as blades — the viewmodel is
+authored for a 30° field and the shoulders sit at/behind the eye. Tested: holding the weapon's
+own FOV equal to the camera's does not help. Fix by elimination with eye shots: the arms +
+gloves are one vertex shader, bytecode FNV `76fbfb1ef6146ed9`; hiding its draws while the
+write is classified Viewmodel leaves a clean floating gun (`hide`/`unhide`/`hidden` commands;
+hidden by default). Push default 0.15 m. This is also the shape the controller-held gun needs.
