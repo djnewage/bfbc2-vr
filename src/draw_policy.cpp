@@ -121,20 +121,29 @@ ProjClass compare_projection(const ProjParams& draw, const ProjParams& world, co
     return ProjClass::Same;
 }
 
+const char* draw_class_name(DrawClass c)
+{
+    switch (c) {
+    case DrawClass::Unclassified:  return "-";
+    case DrawClass::OwnProjection: return "own-proj";
+    case DrawClass::Viewmodel:     return "VIEWMODEL";
+    }
+    return "?";
+}
+
 DrawClass classify(const DrawSignature& s, const Thresholds& th)
 {
     if (!s.has_wvp) return DrawClass::Unclassified;
     if (s.proj == ProjClass::NoWvp || s.proj == ProjClass::NotPerspective) return DrawClass::Unclassified;
-    if (th.require_bones && !s.has_bones) return DrawClass::Unclassified;
 
-    const bool own_projection = s.proj == ProjClass::FovDiffers ||
-                                s.proj == ProjClass::DepthDiffers ||
-                                s.proj == ProjClass::Both;
-    const bool near = s.view_dist <= th.max_view_dist &&
+    const bool own_fov   = s.proj == ProjClass::FovDiffers || s.proj == ProjClass::Both;
+    const bool own_depth = s.proj == ProjClass::DepthDiffers || s.proj == ProjClass::Both;
+    const bool near = s.view_dist >= 0.0f && s.view_dist <= th.max_view_dist &&
                       s.view_origin[2] >= -th.max_view_z && s.view_origin[2] <= th.max_view_z;
 
-    if (th.accept_on_projection && own_projection) return DrawClass::Viewmodel;
-    if (near) return DrawClass::Viewmodel;
+    const bool bones_ok = s.has_bones || !th.require_bones;
+    if (bones_ok && ((th.accept_on_projection && own_fov) || near)) return DrawClass::Viewmodel;
+    if (own_fov || own_depth) return DrawClass::OwnProjection;
     return DrawClass::Unclassified;
 }
 

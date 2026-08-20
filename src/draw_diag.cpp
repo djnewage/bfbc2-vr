@@ -31,7 +31,8 @@ struct Agg {
     Key      key;
     unsigned long long shader_hash = 0;
     unsigned shader_bytes = 0;
-    unsigned draws = 0, prims = 0, indexed = 0, classified = 0;
+    unsigned draws = 0, prims = 0, indexed = 0, classified = 0, ownproj = 0;
+    unsigned bones_at_write = 0, require_bones = 0;
     float    view_min = 1e9f, view_max = -1.0f;
     float    world_min = 1e9f, world_max = -1.0f;
     float    vz_min = 1e9f, vz_max = -1e9f;
@@ -135,7 +136,10 @@ void dump()
             fprintf(f, "  (no perspective wvp)");
         }
         fprintf(f, "  bones=%d", k.has_bones ? 1 : 0);
-        if (a.classified) fprintf(f, "  CLASSIFIED=%u", a.classified);
+        if (a.classified) fprintf(f, "  VIEWMODEL=%u", a.classified);
+        if (a.ownproj)    fprintf(f, "  own-proj=%u", a.ownproj);
+        if (a.classified || a.ownproj)
+            fprintf(f, " (at write: bones=%u/%u require=%u/%u)", a.bones_at_write, a.draws, a.require_bones, a.draws);
         if (a.have_bone0) {
             // Bone 0 as a 3x4 (three registers): translation column + the 3x3.
             // Near-identity 3x3 with small translation = bind/object space;
@@ -167,7 +171,7 @@ void dump()
         VRLOG("[draws]  %5.1f/frame vs=%p ret=%06x %s bones=%d view=[%.2f..%.2f] near=%.3f a=%.3f%s",
               a.draws * inv_frames, a.key.shader, a.key.ret_rva, drawpolicy::proj_class_name(a.key.proj),
               a.key.has_bones ? 1 : 0, a.view_min, a.view_max, a.p_first.near_z(), a.p_first.a,
-              a.classified ? " CLASSIFIED" : "");
+              a.classified ? " VIEWMODEL" : (a.ownproj ? " own-proj" : ""));
         if (++listed == 12) { VRLOG("[draws]  ... see file for the rest"); break; }
     }
     ++g_dump_index;
@@ -220,6 +224,9 @@ void on_draw(const Record& r)
     a->prims += r.prims;
     if (r.indexed) ++a->indexed;
     if (r.cls == drawpolicy::DrawClass::Viewmodel) ++a->classified;
+    if (r.cls == drawpolicy::DrawClass::OwnProjection) ++a->ownproj;
+    if (r.bones_at_write) ++a->bones_at_write;
+    if (r.require_bones) ++a->require_bones;
     if (r.view_dist >= 0.0f) {
         a->view_min = (std::min)(a->view_min, r.view_dist);
         a->view_max = (std::max)(a->view_max, r.view_dist);

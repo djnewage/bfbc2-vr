@@ -40,6 +40,8 @@ struct Record {
     bool               have_bone0   = false;
     float              bone0[12]    = {};      // first 3 registers of boneMatrices
     drawpolicy::DrawClass cls       = drawpolicy::DrawClass::Unclassified;
+    bool               bones_at_write = false;  // has_bones the classifier actually saw
+    bool               require_bones  = true;   // threshold in force at the write
 };
 
 // Arm a capture of `frames` Presents. Safe to call while one is running (no-op).

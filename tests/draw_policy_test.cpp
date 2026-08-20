@@ -128,9 +128,16 @@ static void test_compare_and_classify()
     s.has_bones = true; s.view_dist = 5.0f; s.view_origin[2] = 5.0f;
     CHECK(classify(s, th) == DrawClass::Unclassified);               // far
     s.proj = ProjClass::FovDiffers;
-    CHECK(classify(s, th) == DrawClass::Viewmodel);                  // own P is enough
+    CHECK(classify(s, th) == DrawClass::Viewmodel);                  // own FOV is enough
     th.accept_on_projection = false;
-    CHECK(classify(s, th) == DrawClass::Unclassified);
+    CHECK(classify(s, th) == DrawClass::OwnProjection);              // still needs its own P
+    th = Thresholds{};
+    s.proj = ProjClass::DepthDiffers;
+    CHECK(classify(s, th) == DrawClass::OwnProjection);              // near plane alone != weapon
+    s.has_bones = false; s.proj = ProjClass::FovDiffers;
+    CHECK(classify(s, th) == DrawClass::OwnProjection);              // no bones: own P, no offset
+    s.proj = ProjClass::Both; s.has_bones = true;
+    CHECK(classify(s, th) == DrawClass::Viewmodel);
 
     s.proj = ProjClass::NotPerspective; s.view_dist = 0.1f; s.view_origin[2] = 0.1f;
     CHECK(classify(s, Thresholds{}) == DrawClass::Unclassified);     // ortho never

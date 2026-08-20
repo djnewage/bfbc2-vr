@@ -101,9 +101,18 @@ struct Thresholds {
     bool  accept_on_projection = true; // own P alone is sufficient evidence
 };
 
-enum class DrawClass : unsigned char { Unclassified = 0, Viewmodel };
+enum class DrawClass : unsigned char {
+    Unclassified = 0,   // global correction
+    OwnProjection,      // rendered with its own P (far-scene pass with a pushed
+                        // near plane, skybox...): corrected around ITS P, no offset
+    Viewmodel,          // the first-person weapon/arms: own P AND offset (push/grip)
+};
+const char* draw_class_name(DrawClass c);
 
-// Fail-closed: Viewmodel only when every required leg holds.
+// Fail-closed. Viewmodel = bones (if required) AND (own FIELD OF VIEW, or
+// origin at the eye). A different near plane alone is not a weapon - the
+// engine draws distant passes that way - but such draws still need the
+// correction built around their own P, hence OwnProjection.
 DrawClass classify(const DrawSignature& s, const Thresholds& th);
 
 // Which projection the corrected viewmodel should be rendered with.

@@ -168,11 +168,12 @@ unsigned g_frame_index = 0;
 // built for - the weapon typically uses one P, so this is a 1-entry cache.
 struct VmCorrection {
     drawpolicy::ProjParams key;
+    bool     with_offset = false;
     unsigned frame = ~0u;
     float    c[16] = {};
     bool     valid = false;
 };
-VmCorrection g_vmcorr;
+VmCorrection g_vmcorr[2];   // [0] own-projection only, [1] viewmodel with offset
 
 // View-space distance histogram of every corrected write, so the scene's
 // distribution stays measurable (and the viewmodel band visible).
@@ -197,6 +198,8 @@ struct PendingWvp {
     float w33 = 0.0f, w23 = 0.0f;
     bool  have_bone0 = false;
     float bone0[12] = {};
+    bool  bones_at_write = false;
+    bool  require_bones  = true;
 };
 thread_local PendingWvp t_pending;
 
@@ -455,31 +458,34 @@ void rebuild_correction()
     if (!drawpolicy::recover_projection(g_vp, g_world_proj)) {
         g_world_proj = drawpolicy::ProjParams{};
     }
-    g_vmcorr.valid = false;   // rebuilt lazily on the first classified write
+    g_vmcorr[0].valid = g_vmcorr[1].valid = false;   // rebuilt lazily per frame
 }
 
-// Viewmodel correction for a draw whose own projection is `p`, cached per
-// frame. Falls back to "none" (caller uses the global correction) if the
-// math refuses.
-const float* viewmodel_correction(const drawpolicy::ProjParams& p)
+// Correction for a draw rendered with its own projection `p`, cached per
+// frame. with_offset = the weapon (push / grip delta, projection per DELETE
+// mode); without = own-projection scene passes (corrected around their own P,
+// which is kept, no offset). Null = caller uses the global correction.
+const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_offset)
 {
     if (!g_have_cview || g_vm_mode <= 0) return nullptr;
-    const bool same_key = g_vmcorr.valid && g_vmcorr.frame == g_frame_index &&
-        g_vmcorr.key.a == p.a && g_vmcorr.key.b == p.b && g_vmcorr.key.q == p.q && g_vmcorr.key.t == p.t;
-    if (same_key) return g_vmcorr.c;
+    VmCorrection& vc = g_vmcorr[with_offset ? 1 : 0];
+    const bool same_key = vc.valid && vc.frame == g_frame_index &&
+        vc.key.a == p.a && vc.key.b == p.b && vc.key.q == p.q && vc.key.t == p.t;
+    if (same_key) return vc.c;
 
     drawpolicy::ProjSelect sel = drawpolicy::ProjSelect::Viewmodel;
-    if (g_vm_mode == 2) sel = drawpolicy::ProjSelect::Hybrid;
-    if (g_vm_mode == 3) sel = drawpolicy::ProjSelect::World;
+    if (with_offset && g_vm_mode == 2) sel = drawpolicy::ProjSelect::Hybrid;
+    if (with_offset && g_vm_mode == 3) sel = drawpolicy::ProjSelect::World;
     const drawpolicy::ProjParams psel = drawpolicy::select_projection(sel, p, g_world_proj);
 
     Mat4 delta;
-    translation(0.0f, 0.0f, g_vm_push, delta);   // D3D view space: +z forward
+    translation(0.0f, 0.0f, with_offset ? g_vm_push : 0.0f, delta);   // D3D view space: +z forward
 
-    g_vmcorr.key = p;
-    g_vmcorr.frame = g_frame_index;
-    g_vmcorr.valid = drawpolicy::build_viewmodel_correction(p, delta, g_cview, psel, g_vmcorr.c);
-    return g_vmcorr.valid ? g_vmcorr.c : nullptr;
+    vc.key = p;
+    vc.with_offset = with_offset;
+    vc.frame = g_frame_index;
+    vc.valid = drawpolicy::build_viewmodel_correction(p, delta, g_cview, psel, vc.c);
+    return vc.valid ? vc.c : nullptr;
 }
 
 } // namespace
@@ -559,8 +565,11 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
                 ? drawpolicy::classify(sig, g_vm_th) : drawpolicy::DrawClass::Unclassified;
             if (cls == drawpolicy::DrawClass::Viewmodel) {
                 ++g_vm_hits;
-                if (sig.proj != drawpolicy::ProjClass::Same) ++g_vm_ownp;
-                const float* vm = viewmodel_correction(p);
+                const float* vm = viewmodel_correction(p, true);
+                if (vm) corr = vm;
+            } else if (cls == drawpolicy::DrawClass::OwnProjection) {
+                ++g_vm_ownp;
+                const float* vm = viewmodel_correction(p, false);
                 if (vm) corr = vm;
             }
 
@@ -572,6 +581,8 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
             std::memcpy(pend.view_origin, sig.view_origin, sizeof(pend.view_origin));
             pend.view_dist = persp ? sig.view_dist : -1.0f;
             pend.have_bone0 = false;
+            pend.bones_at_write = sig.has_bones;
+            pend.require_bones  = g_vm_th.require_bones;
             if (census && g_have_vp_inv) {
                 Mat4 res;
                 multiply(M, g_vp_inv, res);
@@ -631,6 +642,8 @@ void on_draw(const void* return_address, bool indexed, unsigned prim_count)
         rec.residue_w33 = pend.w33; rec.residue_w23 = pend.w23;
         rec.have_bone0 = pend.have_bone0;
         std::memcpy(rec.bone0, pend.bone0, sizeof(rec.bone0));
+        rec.bones_at_write = pend.bones_at_write;
+        rec.require_bones  = pend.require_bones;
     }
     rec.z_enable = g_rs_z; rec.z_write = g_rs_zw; rec.alpha_blend = g_rs_ab;
     rec.rt_is_backbuffer = g_rt_is_bb; rec.rt_w = g_rt_w; rec.rt_h = g_rt_h;
@@ -750,8 +763,8 @@ void on_present()
         VRLOG("[correct] %s: modified %u transform writes last frame (fingerprints: %u found, %u none)",
               g_transposed ? "transposed" : "row-registers", g_modified_last_frame,
               g_fp_found, g_fp_rejected);
-        VRLOG("[viewmodel] mode=%d push=%.2fm: %u classified writes (%u by own projection); world P tan=%.4f/%.4f near=%.3f",
-              g_vm_mode, g_vm_push, g_vm_hits_last, g_vm_ownp_last,
+        VRLOG("[viewmodel] mode=%d push=%.2fm require_bones=%d: %u VIEWMODEL writes, %u own-projection writes; world P tan=%.4f/%.4f near=%.3f",
+              g_vm_mode, g_vm_push, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last,
               g_world_proj.tan_half_h(), g_world_proj.tan_half_v(), g_world_proj.near_z());
         VRLOG("[vm-hist] view-space <0.1m:%u  <0.5m:%u  <1m:%u  <2m:%u  <5m:%u  >5m:%u",
               g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2],
