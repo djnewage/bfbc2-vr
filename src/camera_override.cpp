@@ -173,7 +173,7 @@ bool  g_fov_auto    = false;
 // built per draw around the draw's OWN projection (cached per distinct P,
 // ~4 per frame); the global form is just the P' == P special case and stays
 // as the fallback for writes whose projection cannot be recovered.
-float g_vm_push   = 0.15f;   // metres forward along the body camera (arm's-length feel; -/= tune)
+float g_vm_push   = 0.0f;    // metres forward along the body camera; 0 chosen in-headset 2026-08-20 (-/= tune)
 int   g_vm_mode   = 2;       // weapon projection: 0 own P, 1 own P, 2 hybrid (world field, own depth), 3 world P
 bool  g_ownproj_on = true;   // Shift+']' toggles, for A/B against the old global-only path
 drawpolicy::Thresholds g_vm_th;
