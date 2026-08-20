@@ -75,6 +75,9 @@ bool command(const char* cmd, const char* args, char* reply, size_t reply_size);
 void status(FILE* f);
 // The world projection's half-angle tangents recovered from VP this frame.
 bool world_tangents(float& tan_half_h, float& tan_half_v);
+// The headset's required half-angle tangents (max over both eyes), from
+// GetProjectionRaw. False until the VR system is up.
+bool headset_tangents(float& tan_half_h, float& tan_half_v);
 void note_render_state(unsigned state, unsigned value);
 void note_render_target(IDirect3DSurface9* surface);
 

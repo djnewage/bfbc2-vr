@@ -47,3 +47,21 @@ move only the render. `fovlock` then holds the best hit every frame; `shot` + `c
 whether the void is gone.
 
 Risk, stated plainly: poking a wrong float can crash the game. Relaunch and reload the level.
+
+## Result 2026-08-20: the engine FOV found and verified
+
+Two-state hunt (zoom toggled by `rmb`, `scanv` zoomed encoding, `refine` un-zoomed) left a
+handful of degree-encoded survivors; poke-verify picked **one heap float holding the camera's
+vertical FOV in degrees** (45.1 default): writing 60 made the recovered tangents exactly
+tan(30°), and locking it at 100 rendered **116°×100° with no void** — the cull frustum follows.
+A structure family (~20 copies, `rad_v` at +0, `tan_h` at +0x350) also tracks it but is derived.
+
+New commands: `fovfind` (input-free re-locate: scan the current vertical FOV in degrees at
+±0.05 %, poke-verify every match, adopt the one that moves the tangents — runs automatically
+~10 s after the world projection appears), `fov <deg>|auto|off|addr <hex>` (hold the engine FOV
+every frame; `auto` = the headset's vertical field from GetProjectionRaw), `dump <hex> [n]`,
+`scanptr <hexlo> <hexhi>`, and `list` now prints the raw bits. Four words in the exe's static
+data pointed into the object's neighbourhood — the lead for a fixed pointer path.
+
+Known cost: while held, the game's own zoom (ADS) cannot change the FOV; scopes need their
+own treatment (BFVR: projection scale + eye-filling reticle quad).

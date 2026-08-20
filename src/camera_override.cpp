@@ -952,6 +952,22 @@ int  last_rendered_eye() { return (g_eye_swap > 0) ? g_last_eye : (g_last_eye ^ 
 bool stereo_active()     { return g_hmd_active && g_correct_on; }
 unsigned modified_last_frame() { return g_modified_last_frame; }
 
+bool headset_tangents(float& tan_half_h, float& tan_half_v)
+{
+    auto* sys = vrtrack::system();
+    if (!sys) return false;
+    float need_h = 0.0f, need_v = 0.0f;
+    for (int e = 0; e < 2; ++e) {
+        float l, r, t, b;
+        sys->GetProjectionRaw(e == 0 ? vr::Eye_Left : vr::Eye_Right, &l, &r, &t, &b);
+        need_h = (std::max)(need_h, (std::max)(std::fabs(l), std::fabs(r)));
+        need_v = (std::max)(need_v, (std::max)(std::fabs(t), std::fabs(b)));
+    }
+    if (need_h < 1e-6f || need_v < 1e-6f) return false;
+    tan_half_h = need_h; tan_half_v = need_v;
+    return true;
+}
+
 bool world_tangents(float& tan_half_h, float& tan_half_v)
 {
     if (!g_world_proj.perspective) return false;
