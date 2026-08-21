@@ -101,6 +101,7 @@ docs/architecture.md  design and phased roadmap
 docs/console.md       commands, status file, and how the FOV was found
 docs/viewmodel-census.md   what the draw census proved, and the bugs it caught
 docs/prior-art-bfvr.md     what transfers from the shipped BF1942 VR mod
+docs/bc2-engine.md         public Frostbite 1.5 class layouts + the reflection system
 tools/                build/install, DXVK, settings, and recon scripts
 ```
 
