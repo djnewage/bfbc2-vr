@@ -4,6 +4,7 @@
 #include "vr_compositor.h"
 #include "draw_policy.h"
 #include "draw_diag.h"
+#include "memscan.h"
 #include "mat4.h"
 #include "logger.h"
 
@@ -190,6 +191,7 @@ unsigned g_frame_index = 0;
 // built for - the weapon typically uses one P, so this is a 1-entry cache.
 struct VmCorrection {
     drawpolicy::ProjParams key;
+    float    zoom = 1.0f;
     bool     with_offset = false;
     unsigned frame = ~0u;
     float    c[16] = {};
@@ -530,6 +532,12 @@ const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_off
     // Weapon: offset + projection per mode. Everything else: around its own
     // P (a/b snapped to the world's when within tolerance), no offset.
     drawpolicy::ProjParams psel = p;
+    // ADS / scope. We hold the engine's FOV at the headset's field, so the
+    // game's own zoom never reaches the render. Re-apply it here as a
+    // magnification of the projection instead - BFVR's
+    // ComputeD3D8ScopeProjectionScale, scale = tan(normal/2)/tan(zoom/2) -
+    // which keeps the optical centre and the near/far interval intact.
+    const float zoom = memscan::engine_zoom();
     if (with_offset) {
         drawpolicy::ProjSelect sel = drawpolicy::ProjSelect::Viewmodel;
         if (g_vm_mode == 2) sel = drawpolicy::ProjSelect::Hybrid;
@@ -538,13 +546,15 @@ const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_off
     } else {
         psel = drawpolicy::correction_projection(p, g_world_proj);
     }
+    if (zoom > 1.001f) { psel.a *= zoom; psel.b *= zoom; }
 
     // Cache per (p, with_offset) for this frame.
     VmCorrection* slot = nullptr;
     for (size_t i = 0; i < kVmCache; ++i) {
         VmCorrection& vc = g_owncache[i];
         if (vc.valid && vc.frame == g_frame_index && vc.with_offset == with_offset &&
-            vc.key.a == p.a && vc.key.b == p.b && vc.key.q == p.q && vc.key.t == p.t) return vc.c;
+            vc.key.a == p.a && vc.key.b == p.b && vc.key.q == p.q && vc.key.t == p.t &&
+            vc.zoom == zoom) return vc.c;
         if (!slot && (!vc.valid || vc.frame != g_frame_index)) slot = &vc;
     }
     if (!slot) slot = &g_owncache[g_owncache_next++ % kVmCache];   // round-robin if a frame has more
@@ -553,6 +563,7 @@ const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_off
     translation(0.0f, 0.0f, with_offset ? g_vm_push : 0.0f, delta);   // D3D view space: +z forward
 
     slot->key = p;
+    slot->zoom = zoom;
     slot->with_offset = with_offset;
     slot->frame = g_frame_index;
     slot->valid = drawpolicy::build_viewmodel_correction(p, delta, g_cview, psel, slot->c);

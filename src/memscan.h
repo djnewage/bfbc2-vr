@@ -34,4 +34,13 @@ void on_present();
 // Append scanner/hunt state to a status file.
 void status(FILE* f);
 
+// The zoom the ENGINE wants right now, as a magnification factor relative to
+// its own default field (1 = no zoom, 3.4 = a 3.4x scope). We hold the camera
+// FOV at the headset's field, so the engine's own zoom write never reaches the
+// render; this reports it so the correction can apply it as a projection
+// scale instead - BFVR's approach (ComputeD3D8ScopeProjectionScale):
+//     scale = tan(normalFov/2) / tan(zoomFov/2)
+// Returns 1.0 when not zoomed or when the FOV address is unknown.
+float engine_zoom();
+
 } // namespace memscan

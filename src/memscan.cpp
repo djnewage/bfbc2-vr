@@ -293,6 +293,13 @@ bool     g_fovfind_pending = false;      // adopt the first hunt hit when the hu
 unsigned g_fovfind_attempts = 0;
 unsigned g_fov_stable_frames = 0;        // frames with a valid world projection
 
+// What the engine last wrote into the FOV field on its own (read back before
+// each of our writes). While we hold the field, this is the only trace of the
+// game's intent - notably its ADS/scope zoom.
+float    g_fov_engine_intent = 0.0f;
+float    g_zoom = 1.0f;
+bool     g_zoom_enabled = true;
+
 void dump_words(const char* base, unsigned count)
 {
     for (unsigned i = 0; i < count; i += 4) {
@@ -774,6 +781,15 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
                     g_fov_mode == FovMode::Auto ? "auto" : g_fov_mode == FovMode::Fixed ? "fixed" : "off", g_fov_fixed_deg, g_fov_original);
         return true;
     }
+    if (!strcmp(cmd, "zoom")) {
+        if (has1) {
+            if (!_stricmp(a1, "on")) g_zoom_enabled = true;
+            else if (!_stricmp(a1, "off")) { g_zoom_enabled = false; g_zoom = 1.0f; }
+        }
+        _snprintf_s(reply, n, _TRUNCATE, "zoom %s: engine wants %.2f deg (default %.2f) -> %.2fx",
+                    g_zoom_enabled ? "on" : "off", g_fov_engine_intent, g_fov_original, g_zoom);
+        return true;
+    }
     if (!strcmp(cmd, "vmfov")) {
         if (!has1) {
             _snprintf_s(reply, n, _TRUNCATE, "vmfov: addr=%p mode=%s fixed=%.1f orig=%.2f", static_cast<void*>(g_vmfov_addr),
@@ -879,9 +895,28 @@ void on_present()
             else target = g_fov_original;
         }
         target = (std::min)((std::max)(target, 20.0f), 150.0f);
+
+        // Read before writing: anything that is not our own target is the
+        // engine's own intent for this frame (idle 45.1, scoped ~13.9...).
+        float seen = 0.0f;
+        if (read_float(g_fov_addr, seen) && seen > 1.0f && seen < 179.0f &&
+            std::fabs(seen - target) > 0.01f) {
+            g_fov_engine_intent = seen;
+        }
+        if (g_zoom_enabled && g_fov_original > 1.0f && g_fov_engine_intent > 1.0f) {
+            const float tn = std::tan(0.5f * g_fov_original * kPi / 180.0f);
+            const float tz = std::tan(0.5f * g_fov_engine_intent * kPi / 180.0f);
+            const float z = (tz > 1e-5f) ? tn / tz : 1.0f;
+            g_zoom = (std::min)((std::max)(z, 1.0f), 12.0f);
+        } else {
+            g_zoom = 1.0f;
+        }
+
         write_float(g_fov_addr, target);
     }
 }
+
+float engine_zoom() { return g_zoom_enabled ? g_zoom : 1.0f; }
 
 void status(FILE* f)
 {
@@ -895,6 +930,7 @@ void status(FILE* f)
                 static_cast<void*>(g_fov_addr), g_fov_mode == FovMode::Auto ? "auto" : g_fov_mode == FovMode::Fixed ? "fixed" : "off",
                 g_fov_fixed_deg, g_fov_original, ok ? cur : 0.0f, g_fovfind_attempts);
         float vcur = 0.0f; const bool vok = g_vmfov_addr && read_float(g_vmfov_addr, vcur);
+        fprintf(f, "zoom: %s engine-intent=%.2f deg -> %.2fx\n", g_zoom_enabled ? "on" : "off", g_fov_engine_intent, g_zoom);
         fprintf(f, "weapon fov: addr=%p mode=%s fixed=%.1f original=%.2f current=%.2f attempts=%u\n",
                 static_cast<void*>(g_vmfov_addr), g_vmfov_mode == VmFovMode::Follow ? "follow" : g_vmfov_mode == VmFovMode::Fixed ? "fixed" : "off",
                 g_vmfov_fixed_deg, g_vmfov_original, vok ? vcur : 0.0f, g_vmfovfind_attempts);
