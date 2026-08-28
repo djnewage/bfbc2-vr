@@ -1279,6 +1279,34 @@ bool headset_tangents(float& tan_half_h, float& tan_half_v)
     return true;
 }
 
+bool aim_error(float& yaw_error, float& pitch_error)
+{
+    yaw_error = 0.0f; pitch_error = 0.0f;
+    if (!g_hmd_active || !g_have_ref_pose) return false;
+    float pose[12];
+    if (!vrtrack::controller_pose(g_grip_hand, pose)) return false;
+
+    float dir[3];
+    if (!drawpolicy::controller_dir_in_body(pose, g_ref_head_pose, g_turn_yaw, dir)) return false;
+
+    // The game's aim is (0,0,1) in camera coordinates, so the error is just
+    // where the barrel points in that frame.
+    const float h = std::sqrt(dir[0]*dir[0] + dir[2]*dir[2]);
+    if (h < 1e-3f) return false;              // straight up or down: no yaw meaning
+    yaw_error = std::atan2(dir[0], dir[2]);
+    pitch_error = std::atan2(dir[1], h);
+    return true;
+}
+
+void compensate_aim_turn(float body_yaw_delta)
+{
+    if (!std::isfinite(body_yaw_delta)) return;
+    // view_yaw = body_yaw + head_yaw + turn_offset, so absorbing the body's
+    // rotation into the offset holds the presented view still. A deliberate
+    // turn deliberately does NOT come through here.
+    g_turn_yaw = aimpolicy::wrap_pi(g_turn_yaw - body_yaw_delta);
+}
+
 bool weapon_tangents(float& tan_half_h, float& tan_half_v)
 {
     if (!g_weapon_proj.perspective || g_frame_index - g_weapon_proj_frame > 120) return false;

@@ -74,6 +74,17 @@ bool body_frame(float& yaw, float& pitch, float pos[3]);
 // The live head frame in tracking space (current pose).
 bool head_frame(float& yaw, float& pitch, float pos[3]);
 
+// Where the weapon-hand controller points, in the game camera's frame, and the
+// yaw error between that and the game's own aim - which in camera coordinates
+// is simply (0,0,1), so the body's world heading cancels. False when there is
+// no tracked controller or no reference.
+bool aim_error(float& yaw_error, float& pitch_error);
+
+// Remove a body rotation WE commanded from the presentation, so steering the
+// game's aim toward the gun does not swing the player's view. Deliberate turns
+// (snap) are NOT passed through here: they should move the view.
+void compensate_aim_turn(float body_yaw_delta);
+
 // Rotate the PRESENTED view by `radians` (positive = left, matching the yaw
 // convention in aim_policy.h). Used by snap turn. This is the only sanctioned
 // way to move the view reference; it keeps the already-computed head delta

@@ -225,6 +225,18 @@ bool head_right_in_world(const float head_now[12], const float head_ref[12],
 bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
                    float turn_yaw, const float cam_rows[9], float out[3]);
 
+// Where a controller points, expressed in the GAME CAMERA's frame.
+//
+// This is what makes the aim error simple. The game's own aim is, by
+// definition, (0,0,1) in camera coordinates - so the error between the barrel
+// and the game's aim is just the controller's direction re-expressed in that
+// frame, and the body's world heading cancels out entirely. No world
+// handedness enters, which is the whole class of sign bug avoided.
+//
+// `turn_yaw` is the deliberate turn offset held by the presentation.
+bool controller_dir_in_body(const float ctrl_pose[12], const float head_ref[12],
+                            float turn_yaw, float out[3]);
+
 // A discontinuity this large BETWEEN CONSECUTIVE ACCEPTED SAMPLES means
 // tracking glitched or the weapon changed; the caller re-calibrates rather
 // than teleporting the weapon (BFVR uses 0.50 m).

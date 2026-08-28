@@ -341,6 +341,31 @@ bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
     return true;
 }
 
+bool controller_dir_in_body(const float ctrl_pose[12], const float head_ref[12],
+                            float turn_yaw, float out[3])
+{
+    Mat4 rctl, rref, rinv;
+    openvr_rotation_to_view(ctrl_pose, rctl);
+    openvr_rotation_to_view(head_ref, rref);
+    rotation_inverse(rref, rinv);
+
+    // The controller's pointing axis. In our left-handed view convention the
+    // forward of a converted OpenVR pose is +z (OpenVR's -Z), i.e. row 2.
+    const float fwd_local[3] = { 0.0f, 0.0f, 1.0f };
+    float fwd_track[3], fwd_ref[3];
+    rotate_dir(fwd_local, rctl, fwd_track);   // into tracking space
+    rotate_dir(fwd_track, rinv, fwd_ref);     // into the reference's frame
+
+    Mat4 T; m4::rotation_y(turn_yaw, T);
+    rotate_dir(fwd_ref, T, out);              // carried by a deliberate turn
+
+    for (int i = 0; i < 3; ++i) if (!std::isfinite(out[i])) return false;
+    const float len = std::sqrt(out[0]*out[0] + out[1]*out[1] + out[2]*out[2]);
+    if (len < 1e-4f) return false;
+    for (int i = 0; i < 3; ++i) out[i] /= len;
+    return true;
+}
+
 bool grip_delta_step_is_sane(const Mat4 previous, const Mat4 current, float max_step)
 {
     const float dx = at(current, 3, 0) - at(previous, 3, 0);

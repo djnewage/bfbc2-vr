@@ -74,3 +74,38 @@ body. Two reasons this matters:
 that steers the game's own aim toward the controller direction. Design and risks are in the
 approved plan; the pure math (`src/aim_policy.cpp`) and the view-reference writer already exist
 and are tested.
+
+## Body follows gun (Phase B, 2026-08-28)
+
+The engine aims along its own camera; the weapon only follows the controller visually. This loop
+closes that gap by steering the game's own aim onto the barrel, so the shot goes where the gun
+points — the honest version of "bullets follow the barrel", achieved without touching
+projectiles at all. BFVR does the same for BF1942.
+
+**The error is trivial to compute, which is the nice part.** The game's aim is, by definition,
+`(0,0,1)` in camera coordinates — so the error *is* the controller's direction expressed in that
+frame, and the body's world heading cancels out entirely. No world handedness enters, which
+removes the class of sign bug that has cost this project the most time
+(`drawpolicy::controller_dir_in_body`).
+
+Controller: proportional only, no integral. Deadzone ~0.6°, per-emit clamp of 0.12 rad (the
+measured mouse response is mildly non-linear above ~500 counts, so small steps stay in the
+trustworthy region), a 60° error cap that stops chasing rather than spinning, and a carried
+sub-count remainder so small errors converge instead of rounding to zero forever.
+
+Two rules that keep it from oscillating or fighting the player:
+
+- **One correction per fresh controller sample.** Present runs faster than the runtime produces
+  poses, so without a sequence check every correction is emitted twice — the single biggest
+  source of oscillation in a loop like this.
+- **Compensate what was commanded, not what is observed.** After emitting, the presentation
+  absorbs exactly the rotation we asked for (the *rounded* count converted back through the
+  gain, or the rounding difference accumulates into a drift). Because it is attributable to us,
+  a snap turn and the player's own mouse — both of which *should* move the view — are untouched.
+
+`aim on|off`, `aim kp <x>`, `aim deadzone <rad>`; the status block reports the live yaw error,
+emit and blocked counts.
+
+**Yaw only, for now.** Steering the body vertically would pitch the player's view unless the
+presentation offset carries a pitch term too. That is the next increment and is deliberately not
+bundled with this one — one behavioural change per test build.

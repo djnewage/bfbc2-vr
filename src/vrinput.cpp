@@ -75,6 +75,36 @@ struct PendingTurn {
 PendingTurn g_pending;
 constexpr int kTurnSettleFrames = 8;
 float g_last_measured_ratio = 0.0f;
+
+// ---------------------------------------------------------------------------
+// BODY FOLLOWS GUN.
+//
+// The engine aims along its own camera; the weapon merely follows the
+// controller visually. This loop closes that gap by steering the game's own
+// aim onto the barrel, so the shot goes where the gun points - the honest
+// version of "bullets follow the barrel", achieved without touching
+// projectiles at all (BFVR does the same for BF1942).
+//
+// The error is simple because the game's aim is (0,0,1) in camera coordinates:
+// the error IS the controller's direction expressed in that frame, and the
+// body's world heading cancels out. See drawpolicy::controller_dir_in_body.
+//
+// Yaw only for now. Pitch needs the presentation offset to carry a pitch term
+// as well, or steering the body vertically would tilt the player's view; that
+// is the next increment, deliberately not bundled with this one.
+bool  g_aim_on = false;
+float g_aim_kp = 0.35f;              // proportional, no integral
+float g_aim_deadzone = 0.010f;       // rad (~0.6 deg) - inside this, leave it alone
+float g_aim_max_step = 0.12f;        // rad per emit; the response measured
+                                     // non-linear above ~500 counts, so small
+                                     // steps stay in the trustworthy region
+float g_aim_max_error = 1.05f;       // rad (~60 deg): beyond this something is
+                                     // out of sync - stop chasing, do not spin
+float g_aim_residue = 0.0f;          // sub-count carry, or small errors would
+                                     // round to zero and never converge
+unsigned g_aim_emits = 0, g_aim_blocked = 0;
+float g_aim_last_error = 0.0f;
+unsigned g_aim_last_seq = 0;         // one correction per FRESH controller sample
 float g_stick_on = 0.35f, g_stick_off = 0.25f;
 float g_trigger_threshold = 0.6f;
 
@@ -118,6 +148,8 @@ void hold_mouse(bool& state, bool want, bool right)
     state = want;
     osinput::send_mouse_button(right, want);
 }
+
+void update_aim(int hand);   // defined below, used by on_present
 
 int weapon_hand() { return g_swap_hands ? 0 : 1; }
 int move_hand()   { return g_swap_hands ? 1 : 0; }
@@ -196,6 +228,56 @@ DWORD g_test_until = 0;
 void publish()
 {
     inputbus::publish_levels(g_want_keys, g_want_buttons);
+}
+
+// Steer the game's aim toward where the controller points.
+void update_aim(int hand)
+{
+    if (!g_aim_on) return;
+
+    // One correction per fresh controller sample. Present runs faster than the
+    // runtime produces poses, and without this every correction is emitted
+    // twice - the single biggest source of oscillation in a loop like this.
+    const unsigned seq = vrtrack::controller_sequence(hand);
+    if (seq == g_aim_last_seq) return;
+    g_aim_last_seq = seq;
+
+    // Never fight a turn that is still settling, or the measurement and the
+    // correction end up chasing each other.
+    if (g_pending.active) { ++g_aim_blocked; return; }
+
+    float err_yaw = 0.0f, err_pitch = 0.0f;
+    if (!camover::aim_error(err_yaw, err_pitch)) { ++g_aim_blocked; return; }
+    g_aim_last_error = err_yaw;
+
+    if (std::fabs(err_yaw) > g_aim_max_error) { ++g_aim_blocked; return; }
+    if (std::fabs(err_yaw) < g_aim_deadzone) { g_aim_residue = 0.0f; return; }
+
+    float step = err_yaw * g_aim_kp;
+    step = (std::min)((std::max)(step, -g_aim_max_step), g_aim_max_step);
+
+    // Counts, carrying the sub-count remainder so small errors still converge
+    // instead of rounding to zero forever. Truncation toward zero is correct
+    // here precisely because the remainder is carried.
+    const float want = step * g_counts_per_rad * g_turn_sign + g_aim_residue;
+    const int counts = static_cast<int>(want);
+    g_aim_residue = want - static_cast<float>(counts);
+    if (counts == 0) return;
+
+    if (use_dinput()) inputbus::add_impulse(counts, 0);
+    else if (osinput::game_is_foreground()) osinput::send_mouse_move(counts, 0);
+    else { ++g_aim_blocked; return; }
+    ++g_aim_emits;
+
+    // Hold the view still. Compensate what was ACTUALLY EMITTED - the rounded
+    // count converted back through the gain - not the pre-rounding step, or
+    // the difference accumulates into a slow drift. And compensate what we
+    // COMMANDED rather than what we observe, so it is cleanly attributable to
+    // us: a snap turn or the player's own mouse, which must move the view, are
+    // left alone.
+    const float emitted = (g_counts_per_rad > 1.0f)
+        ? static_cast<float>(counts) / (g_counts_per_rad * g_turn_sign) : 0.0f;
+    camover::compensate_aim_turn(emitted);
 }
 
 } // namespace
@@ -295,6 +377,10 @@ void on_present()
         g_held.keys = want;   // keep the hysteresis state coherent across a switch
     }
 
+    // Body follows gun. Runs before the snap turn so a deliberate turn always
+    // wins the frame it is requested in.
+    update_aim(wh);
+
     // Snap turn: a real turn of the BODY through the game's own mouse look, so
     // the aim turns with it. The view follows for free, because the view is
     // built on the game camera.
@@ -328,6 +414,24 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
     if (!strcmp(cmd, "snap")) {
         if (has1) g_snap_degrees = (std::min)((std::max)(static_cast<float>(atof(a1)), 5.0f), 90.0f);
         _snprintf_s(reply, n, _TRUNCATE, "snap turn %.0f degrees", g_snap_degrees);
+        return true;
+    }
+    if (!strcmp(cmd, "aim")) {
+        if (has1) {
+            if (!_stricmp(a1, "on")) { g_aim_on = true; g_aim_residue = 0.0f; }
+            else if (!_stricmp(a1, "off")) { g_aim_on = false; g_aim_residue = 0.0f; }
+            else if (!_stricmp(a1, "kp")) {
+                char b2[16] = {}; if (args) sscanf_s(args, "%*s %15s", b2, static_cast<unsigned>(sizeof(b2)));
+                if (b2[0]) g_aim_kp = (std::min)((std::max)(static_cast<float>(atof(b2)), 0.02f), 1.0f);
+            } else if (!_stricmp(a1, "deadzone")) {
+                char b2[16] = {}; if (args) sscanf_s(args, "%*s %15s", b2, static_cast<unsigned>(sizeof(b2)));
+                if (b2[0]) g_aim_deadzone = (std::min)((std::max)(static_cast<float>(atof(b2)), 0.0f), 0.2f);
+            }
+        }
+        _snprintf_s(reply, n, _TRUNCATE,
+                    "aim %s kp=%.2f deadzone=%.1f deg error=%.1f deg emits=%u blocked=%u gain=%.0f",
+                    g_aim_on ? "on" : "off", g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
+                    g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits, g_aim_blocked, g_counts_per_rad);
         return true;
     }
     if (!strcmp(cmd, "path")) {
@@ -446,6 +550,9 @@ void status(FILE* f)
                 g_turn_sign, g_pending.active ? 1 : 0,
                 yaw * 180.0f / aimpolicy::kPi, pitch * 180.0f / aimpolicy::kPi, had ? "" : " (none)");
     }
+    fprintf(f, "  aim: %s kp=%.2f deadzone=%.2f deg yaw-error=%+.1f deg emits=%u blocked=%u\n",
+            g_aim_on ? "ON" : "off", g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
+            g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits, g_aim_blocked);
     fprintf(f, "  held: w=%d a=%d s=%d d=%d sprint=%d crouch=%d fire=%d ads=%d reload=%d jump=%d\n",
             g_held.keys.forward, g_held.keys.left, g_held.keys.back, g_held.keys.right,
             g_held.sprint, g_held.crouch, g_held.fire, g_held.ads, g_held.reload, g_held.jump);
