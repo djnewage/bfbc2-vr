@@ -184,4 +184,55 @@ bool build_viewmodel_correction(const ProjParams& p_vm, const Mat4 delta_view,
     return true;
 }
 
+void openvr_pose_to_view(const float pose3x4[12], Mat4 out)
+{
+    m4::identity(out);
+    // Row-vector form: our M[r][c] is the column-vector R[c][r].
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            at(out, r, c) = pose3x4[c * 4 + r];
+    at(out, 3, 0) = pose3x4[0 * 4 + 3];
+    at(out, 3, 1) = pose3x4[1 * 4 + 3];
+    at(out, 3, 2) = pose3x4[2 * 4 + 3];
+
+    // Conjugate by C = diag(1,1,-1): negate every element with exactly one z.
+    at(out, 0, 2) = -at(out, 0, 2);
+    at(out, 1, 2) = -at(out, 1, 2);
+    at(out, 2, 0) = -at(out, 2, 0);
+    at(out, 2, 1) = -at(out, 2, 1);
+    at(out, 3, 2) = -at(out, 3, 2);
+}
+
+bool make_grip_delta(const Mat4 head_view, const Mat4 grip_view,
+                     const Mat4 ref_head_view, const Mat4 ref_grip_view,
+                     float units_per_metre, Mat4 out)
+{
+    Mat4 head_inv, ref_head_inv;
+    if (!m4::invert(head_view, head_inv)) return false;
+    if (!m4::invert(ref_head_view, ref_head_inv)) return false;
+
+    Mat4 grip_in_head, ref_grip_in_head;
+    m4::multiply(grip_view, head_inv, grip_in_head);
+    m4::multiply(ref_grip_view, ref_head_inv, ref_grip_in_head);
+
+    Mat4 ref_inv;
+    if (!m4::invert(ref_grip_in_head, ref_inv)) return false;
+    m4::multiply(ref_inv, grip_in_head, out);
+
+    if (units_per_metre != 1.0f) {
+        at(out, 3, 0) *= units_per_metre;
+        at(out, 3, 1) *= units_per_metre;
+        at(out, 3, 2) *= units_per_metre;
+    }
+    for (int i = 0; i < 16; ++i) if (!std::isfinite(out[i])) return false;
+    return true;
+}
+
+bool grip_delta_is_sane(const Mat4 delta, float max_translation)
+{
+    const float x = at(delta, 3, 0), y = at(delta, 3, 1), z = at(delta, 3, 2);
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
+    return (x * x + y * y + z * z) <= max_translation * max_translation;
+}
+
 } // namespace drawpolicy

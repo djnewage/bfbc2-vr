@@ -140,3 +140,36 @@ own FOV equal to the camera's does not help. Fix by elimination with eye shots: 
 gloves are one vertex shader, bytecode FNV `76fbfb1ef6146ed9`; hiding its draws while the
 write is classified Viewmodel leaves a clean floating gun (`hide`/`unhide`/`hidden` commands;
 hidden by default). Push default 0.15 m. This is also the shape the controller-held gun needs.
+
+## 7. The weapon follows a motion controller (Phase 7a, 2026-08-27)
+
+No engine reverse engineering was needed for this: the arm's-length push already occupied the
+offset slot in `M' = M · P_vm⁻¹ · Δ · C_view · P_sel`, which is the same slot BFVR feeds its
+grip delta into (`World · sourceView · gripDelta · residualEye · P`). Δ simply became the
+controller's motion instead of a constant.
+
+**The math** (`draw_policy.cpp`, unit-tested):
+
+- `openvr_pose_to_view` converts an OpenVR 3×4 (column-vector, right-handed, −Z forward) into
+  our row-vector left-handed view convention by transposing the rotation and conjugating with
+  `C = diag(1,1,−1)`.
+- `make_grip_delta` = `inverse(gripAtCalibration ⊘ head) · (grip ⊘ head)`, i.e. head-relative,
+  so shared head-and-hand motion (walking, leaning) leaves the weapon alone.
+- It is a **full rigid delta**. Rotating the controller in place yields a non-zero translation —
+  the compensating term that keeps the *grip point* fixed. A rotation-only delta would swing
+  the weapon about the eye instead (BFVR's recorded dead-end). The unit test asserts the grip
+  point maps to itself rather than asserting the translation is zero; the first version of that
+  test asserted the wrong thing and the code was right.
+- Fail-closed: no actively-tracked pose (VALID alone is refused — OpenVR keeps reporting an
+  inferred pose after tracking loss), a non-invertible pose, or a jump over 0.5 m between
+  accepted samples drops back to the native weapon pose and re-calibrates.
+
+**Scope, stated plainly:** this is *presentation only*. The engine still owns aim, firing,
+recoil, reload and projectiles, so the bullet does not follow the barrel. Making it do so needs
+either the engine's own fire basis (`ClientWeaponFiringEffects::m_shootSpace`,
+`docs/bc2-engine.md`) or synthesised look input that walks the body's aim onto the controller
+direction (BFVR's `InfantryAuthoritativeAim`).
+
+Commands: `grip on|off|left|right|recal`, `grip <units-per-metre>`, `gripsmooth <0..1>`.
+Calibration happens on the first tracked sample after `grip on` or `recenter`: hold the
+controller where the on-screen weapon already is, then move.

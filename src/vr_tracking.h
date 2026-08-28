@@ -15,7 +15,7 @@
 // APIs for exactly this reason. OpenXR arrives with stereo in Phase 4.
 #pragma once
 
-namespace vr { struct HmdMatrix34_t; class IVRSystem; }
+namespace vr { struct HmdMatrix34_t; struct TrackedDevicePose_t; class IVRSystem; }
 
 namespace vrtrack {
 
@@ -27,6 +27,10 @@ namespace vrtrack {
 // provided since the last update(), it wins over the sampled pose.
 void set_render_pose(const vr::HmdMatrix34_t& pose, bool valid);
 
+// The whole pose array from the compositor's WaitGetPoses, so hands and head
+// come from one instant. Call alongside set_render_pose.
+void set_render_poses(const vr::TrackedDevicePose_t* poses, unsigned count);
+
 // Attempt OpenVR init in Background mode. Safe to call every frame; retries
 // on a slow cadence until SteamVR is up, then sticks. Returns current state.
 bool ensure_init();
@@ -36,6 +40,16 @@ void update();
 
 // True when a valid HMD pose was seen this frame.
 bool have_pose();
+
+// Motion controllers. The pose is the device-to-absolute 3x4 (OpenVR
+// convention: column-vector, +X right / +Y up / -Z forward, metres) flattened
+// row-major into 12 floats - the same block OpenVR hands us, unconverted.
+// `hand`: 0 = left, 1 = right. False when that controller has no valid,
+// actively tracked pose this frame (a valid-but-untracked pose is refused:
+// OpenVR keeps reporting an inferred last-known pose, which must never be
+// mistaken for real tracking - BFVR's rule).
+bool controller_pose(int hand, float out3x4[12]);
+bool controller_connected(int hand);
 
 // The HMD orientation as a row-major 3x3 in OpenVR's right-handed, Y-up,
 // -Z-forward convention, relative to the seated/standing origin.

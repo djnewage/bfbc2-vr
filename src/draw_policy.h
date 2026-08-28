@@ -144,4 +144,37 @@ bool build_viewmodel_correction(const ProjParams& p_vm, const m4::Mat4 delta_vie
                                 const m4::Mat4 c_view, const ProjParams& p_sel,
                                 m4::Mat4 out);
 
+// ---------------------------------------------------------------------------
+// Controller-held weapon (Phase 7a: presentation only).
+//
+// An OpenVR device pose is a 3x4 column-vector matrix in a right-handed space
+// (+X right, +Y up, -Z forward, metres). Ours is row-vector and the game's view
+// space is left-handed with +Z forward. `openvr_pose_to_view` converts one to
+// the other: transpose the rotation into row-vector form, then conjugate by
+// C = diag(1,1,-1) so the handedness flips without moving anything.
+void openvr_pose_to_view(const float pose3x4[12], m4::Mat4 out);
+
+// The weapon's offset for this frame: how the grip has moved RELATIVE TO THE
+// HEAD since calibration.
+//
+//   grip_in_head    = grip * inverse(head)
+//   delta           = inverse(grip_in_head_at_calibration) * grip_in_head
+//
+// Head-relative is what makes shared head-and-hand motion (walking, leaning)
+// leave the weapon alone. The delta is a FULL rigid transform, never
+// rotation-only: rotating a controller in place produces a compensating
+// translation that keeps the grip pivot still, and dropping it would swing the
+// weapon about the eye instead (BFVR's dead-end #3).
+//
+// `units_per_metre` scales the translation into world units (1.0 for a metric
+// engine such as Frostbite). Returns false if either pose is degenerate.
+bool make_grip_delta(const m4::Mat4 head_view, const m4::Mat4 grip_view,
+                     const m4::Mat4 ref_head_view, const m4::Mat4 ref_grip_view,
+                     float units_per_metre, m4::Mat4 out);
+
+// A discontinuity this large between accepted samples means tracking glitched
+// or the weapon changed; the caller re-calibrates rather than teleporting the
+// weapon (BFVR uses 0.50 m).
+bool grip_delta_is_sane(const m4::Mat4 delta, float max_translation);
+
 } // namespace drawpolicy

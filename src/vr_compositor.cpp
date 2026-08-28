@@ -343,6 +343,7 @@ bool submit_frame()
         vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
         const auto& hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
         vrtrack::set_render_pose(hmd.mDeviceToAbsoluteTracking, hmd.bPoseIsValid);
+        vrtrack::set_render_poses(poses, vr::k_unMaxTrackedDeviceCount);
         g_wgp_called = true;
     }
 
@@ -558,6 +559,7 @@ bool submit_frame()
     vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
     const auto& hmd_pose = poses[vr::k_unTrackedDeviceIndex_Hmd];
     vrtrack::set_render_pose(hmd_pose.mDeviceToAbsoluteTracking, hmd_pose.bPoseIsValid);
+    vrtrack::set_render_poses(poses, vr::k_unMaxTrackedDeviceCount);
     stage("frame done");
 
     ++g_submits;

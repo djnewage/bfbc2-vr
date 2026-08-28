@@ -254,8 +254,80 @@ static void test_depth_slice_translation_is_exact()
     CHECK_NEAR(c.a, d.a, 0.0f);
 }
 
+// A controller pose that has not moved relative to the head must produce an
+// identity delta no matter where the player physically is - the property that
+// keeps walking and leaning from dragging the weapon around.
+static void test_grip_delta()
+{
+    // OpenVR 3x4 (column-vector, RH): rotation about Y by a, translation t.
+    auto pose = [](float a, float tx, float ty, float tz, float out[12]) {
+        const float c = std::cos(a), s = std::sin(a);
+        const float m[12] = { c, 0, s, tx,
+                              0, 1, 0, ty,
+                             -s, 0, c, tz };
+        for (int i = 0; i < 12; ++i) out[i] = m[i];
+    };
+
+    float h0[12], g0[12], h1[12], g1[12];
+    pose(0.0f, 0.0f, 1.6f, 0.0f, h0);
+    pose(0.0f, 0.2f, 1.2f, -0.3f, g0);
+    Mat4 H0, G0; openvr_pose_to_view(h0, H0); openvr_pose_to_view(g0, G0);
+
+    // 1. Head and hand both move 1 m sideways: nothing relative changed.
+    pose(0.0f, 1.0f, 1.6f, 0.0f, h1);
+    pose(0.0f, 1.2f, 1.2f, -0.3f, g1);
+    Mat4 H1, G1, d; openvr_pose_to_view(h1, H1); openvr_pose_to_view(g1, G1);
+    CHECK(make_grip_delta(H1, G1, H0, G0, 1.0f, d));
+    Mat4 I; m4::identity(I);
+    CHECK(near_matrix(d, I, 1e-4f));
+
+    // 2. Hand alone moves 10 cm right and 5 cm up.
+    pose(0.0f, 0.3f, 1.25f, -0.3f, g1);
+    openvr_pose_to_view(g1, G1);
+    CHECK(make_grip_delta(H0, G1, H0, G0, 1.0f, d));
+    CHECK_NEAR(at(d,3,0), 0.1f, 1e-4f);
+    CHECK_NEAR(at(d,3,1), 0.05f, 1e-4f);
+    CHECK_NEAR(at(d,3,2), 0.0f, 1e-4f);
+
+    // 3. Handedness: OpenVR forward is -Z, view space forward is +Z, so a hand
+    //    pushed away from the player is +z in view space.
+    pose(0.0f, 0.2f, 1.2f, -0.6f, g1);          // 0.3 m further from the player
+    openvr_pose_to_view(g1, G1);
+    CHECK(make_grip_delta(H0, G1, H0, G0, 1.0f, d));
+    CHECK_NEAR(at(d,3,2), 0.3f, 1e-4f);
+
+    // 4. Rotation in place: the delta carries a COMPENSATING TRANSLATION (a
+    //    rotation-only delta is therefore wrong - it would swing the weapon
+    //    about the eye). The invariant is that the grip POINT stays fixed.
+    pose(0.4f, 0.2f, 1.2f, -0.3f, g1);
+    openvr_pose_to_view(g1, G1);
+    CHECK(make_grip_delta(H0, G1, H0, G0, 1.0f, d));
+    CHECK(std::fabs(at(d,0,2)) > 0.3f);                       // it did rotate
+    CHECK(std::fabs(at(d,3,0)) + std::fabs(at(d,3,2)) > 0.01f); // and shifted
+    {
+        // The grip point in head space: translation of grip * inverse(head).
+        Mat4 Hi, gih; CHECK(m4::invert(H0, Hi)); m4::multiply(G0, Hi, gih);
+        const float p[4] = { at(gih,3,0), at(gih,3,1), at(gih,3,2), 1.0f };
+        float q[3] = {};
+        for (int c = 0; c < 3; ++c)
+            q[c] = p[0]*at(d,0,c) + p[1]*at(d,1,c) + p[2]*at(d,2,c) + at(d,3,c);
+        CHECK_NEAR(q[0], p[0], 1e-4f);
+        CHECK_NEAR(q[1], p[1], 1e-4f);
+        CHECK_NEAR(q[2], p[2], 1e-4f);
+    }
+
+    // 5. Scale and sanity gate.
+    pose(0.0f, 0.3f, 1.2f, -0.3f, g1);
+    openvr_pose_to_view(g1, G1);
+    CHECK(make_grip_delta(H0, G1, H0, G0, 10.0f, d));
+    CHECK_NEAR(at(d,3,0), 1.0f, 1e-3f);
+    CHECK(grip_delta_is_sane(d, 2.0f));
+    CHECK(!grip_delta_is_sane(d, 0.5f));
+}
+
 int main()
 {
+    test_grip_delta();
     test_depth_slice_translation_is_exact();
     test_recover_roundtrip();
     test_rejects_non_perspective();

@@ -20,7 +20,49 @@ bool  g_have_render_pose = false;
 float g_render_rot[9] = { 1,0,0, 0,1,0, 0,0,1 };
 float g_render_pos[3] = { 0,0,0 };
 
+// Controller poses, from the same WaitGetPoses the eyes are rendered with, so
+// hand and head belong to one instant.
+bool  g_ctl_valid[2] = { false, false };
+bool  g_ctl_seen[2]  = { false, false };
+float g_ctl[2][12]   = {};
+
+void store_controller(int hand, const vr::TrackedDevicePose_t& p)
+{
+    // VALID alone is not enough: OpenVR reports an inferred last-known pose
+    // as valid after tracking is lost, and a weapon must never be driven by
+    // a guess. Require actively tracked.
+    const bool ok = p.bPoseIsValid && p.bDeviceIsConnected &&
+                    p.eTrackingResult == vr::TrackingResult_Running_OK;
+    g_ctl_seen[hand] = p.bDeviceIsConnected;
+    if (!ok) { g_ctl_valid[hand] = false; return; }
+    const auto& m = p.mDeviceToAbsoluteTracking.m;
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 4; ++c)
+            g_ctl[hand][r * 4 + c] = m[r][c];
+    g_ctl_valid[hand] = true;
+}
+
+void refresh_controllers(const vr::TrackedDevicePose_t* poses, unsigned count)
+{
+    if (!g_system || !poses) return;
+    for (int hand = 0; hand < 2; ++hand) {
+        const auto role = (hand == 0) ? vr::TrackedControllerRole_LeftHand
+                                      : vr::TrackedControllerRole_RightHand;
+        const vr::TrackedDeviceIndex_t idx = g_system->GetTrackedDeviceIndexForControllerRole(role);
+        if (idx == vr::k_unTrackedDeviceIndexInvalid || idx >= count) {
+            g_ctl_valid[hand] = false; g_ctl_seen[hand] = false;
+            continue;
+        }
+        store_controller(hand, poses[idx]);
+    }
+}
+
 } // namespace
+
+void set_render_poses(const vr::TrackedDevicePose_t* poses, unsigned count)
+{
+    refresh_controllers(poses, count);
+}
 
 void set_render_pose(const vr::HmdMatrix34_t& pose, bool valid)
 {
@@ -106,6 +148,8 @@ void update()
     g_system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.02f,
                                               poses, vr::k_unMaxTrackedDeviceCount);
 
+    refresh_controllers(poses, vr::k_unMaxTrackedDeviceCount);
+
     const auto& hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
     if (!hmd.bPoseIsValid) return;
 
@@ -119,6 +163,18 @@ void update()
 }
 
 bool have_pose() { return g_have_pose; }
+
+bool controller_pose(int hand, float out3x4[12])
+{
+    if (hand < 0 || hand > 1 || !g_ctl_valid[hand]) return false;
+    std::memcpy(out3x4, g_ctl[hand], sizeof(g_ctl[hand]));
+    return true;
+}
+
+bool controller_connected(int hand)
+{
+    return (hand >= 0 && hand <= 1) && g_ctl_seen[hand];
+}
 
 void orientation(float out3x3[9])
 {

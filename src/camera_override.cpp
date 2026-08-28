@@ -175,6 +175,30 @@ bool  g_fov_auto    = false;
 // ~4 per frame); the global form is just the P' == P special case and stays
 // as the fallback for writes whose projection cannot be recovered.
 float g_vm_push   = 0.0f;    // metres forward along the body camera; 0 chosen in-headset 2026-08-20 (-/= tune)
+
+// PHASE 7a - the weapon follows a motion controller.
+//
+// The offset slot the push occupies is exactly the slot BFVR feeds its grip
+// delta into (World * sourceView * gripDelta * residualEye * P), so no engine
+// reverse engineering is needed for the gun to follow the hand: the delta is
+// head-relative controller motion since calibration, applied in the body
+// camera's frame, BEFORE the per-eye offset so both eyes share one weapon pose.
+//
+// PRESENTATION ONLY. The engine still owns aim, fire, recoil, reload and
+// projectiles - the bullet does not follow the barrel yet, and pretending
+// otherwise would be worse than not doing it. Fire direction needs either the
+// engine's fire basis or synthesised look input (docs/bc2-engine.md).
+bool  g_grip_on = false;          // 'grip on'
+int   g_grip_hand = 1;            // 0 left, 1 right
+float g_grip_units_per_metre = 1.0f;   // Frostbite is metric
+float g_grip_smooth = 0.0f;       // 0 = raw; otherwise per-frame lerp factor
+bool  g_grip_calibrated = false;
+float g_grip_ref_head[16] = {};
+float g_grip_ref_grip[16] = {};
+float g_grip_delta[16] = {};      // current, view space
+bool  g_grip_active = false;      // a usable delta this frame
+unsigned g_grip_resets = 0;
+constexpr float kGripMaxJump = 0.5f;   // metres between accepted samples
 int   g_vm_mode   = 2;       // weapon projection: 0 own P, 1 own P, 2 hybrid (world field, own depth), 3 world P
 bool  g_ownproj_on = true;   // Shift+']' toggles, for A/B against the old global-only path
 drawpolicy::Thresholds g_vm_th;
@@ -386,6 +410,64 @@ int fingerprint_offset(void* shader, unsigned start, const float* data, unsigned
     return found;
 }
 
+// Head-relative controller motion since calibration, in view space. Fails
+// closed: any missing or implausible sample drops the weapon back to its
+// native pose rather than putting it somewhere invented.
+void update_grip_delta()
+{
+    g_grip_active = false;
+    if (!g_grip_on || !g_hmd_active) { g_grip_calibrated = false; return; }
+
+    float grip_pose[12], head_rot[9], head_pos[3];
+    if (!vrtrack::controller_pose(g_grip_hand, grip_pose)) { g_grip_calibrated = false; return; }
+    vrtrack::orientation(head_rot);
+    vrtrack::position(head_pos);
+
+    // The head as an OpenVR-style 3x4, so both go through one conversion.
+    float head_pose[12];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) head_pose[r * 4 + c] = head_rot[r * 3 + c];
+        head_pose[r * 4 + 3] = head_pos[r];
+    }
+
+    Mat4 head_view, grip_view;
+    drawpolicy::openvr_pose_to_view(head_pose, head_view);
+    drawpolicy::openvr_pose_to_view(grip_pose, grip_view);
+
+    if (!g_grip_calibrated) {
+        std::memcpy(g_grip_ref_head, head_view, sizeof(g_grip_ref_head));
+        std::memcpy(g_grip_ref_grip, grip_view, sizeof(g_grip_ref_grip));
+        g_grip_calibrated = true;
+        identity(g_grip_delta);
+        g_grip_active = true;
+        VRLOG("[grip] calibrated on the %s controller - the weapon now follows it",
+              g_grip_hand ? "right" : "left");
+        return;
+    }
+
+    Mat4 delta;
+    if (!drawpolicy::make_grip_delta(head_view, grip_view,
+                                     reinterpret_cast<const float(&)[16]>(*g_grip_ref_head),
+                                     reinterpret_cast<const float(&)[16]>(*g_grip_ref_grip),
+                                     g_grip_units_per_metre, delta)) {
+        g_grip_calibrated = false; ++g_grip_resets;
+        return;
+    }
+    if (!drawpolicy::grip_delta_is_sane(delta, kGripMaxJump * g_grip_units_per_metre)) {
+        // Tracking glitch or a weapon change: recalibrate instead of teleporting.
+        g_grip_calibrated = false; ++g_grip_resets;
+        VRLOG("[grip] discontinuity - recalibrating (%u)", g_grip_resets);
+        return;
+    }
+    if (g_grip_smooth > 0.001f) {
+        const float a = (std::min)(g_grip_smooth, 1.0f);
+        for (int i = 0; i < 16; ++i) g_grip_delta[i] += (delta[i] - g_grip_delta[i]) * a;
+    } else {
+        std::memcpy(g_grip_delta, delta, sizeof(g_grip_delta));
+    }
+    g_grip_active = true;
+}
+
 // CORRECTION = VP^-1 * RotAboutEye * VP.
 // Valid for any matrix ending in clip space, so the same value corrects a
 // per-object WVP and the global VP alike.
@@ -509,6 +591,9 @@ void rebuild_correction()
         g_have_cview = true;
     }
 
+    // Controller-held weapon: refresh the grip delta for this frame.
+    update_grip_delta();
+
     // The world projection, recovered from VP the same way per-draw
     // projections are, so comparisons are like against like.
     if (!drawpolicy::recover_projection(g_vp, g_world_proj)) {
@@ -552,6 +637,8 @@ const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_off
     VmCorrection* slot = nullptr;
     for (size_t i = 0; i < kVmCache; ++i) {
         VmCorrection& vc = g_owncache[i];
+        // A weapon slot is only reusable within the frame it was built for -
+        // the grip delta changes every frame, and the frame check covers that.
         if (vc.valid && vc.frame == g_frame_index && vc.with_offset == with_offset &&
             vc.key.a == p.a && vc.key.b == p.b && vc.key.q == p.q && vc.key.t == p.t &&
             vc.zoom == zoom) return vc.c;
@@ -559,8 +646,20 @@ const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_off
     }
     if (!slot) slot = &g_owncache[g_owncache_next++ % kVmCache];   // round-robin if a frame has more
 
+    // The weapon's offset in the body camera's frame: the controller delta
+    // when one is live, otherwise the manual push.
     Mat4 delta;
-    translation(0.0f, 0.0f, with_offset ? g_vm_push : 0.0f, delta);   // D3D view space: +z forward
+    if (with_offset && g_grip_active) {
+        std::memcpy(delta, g_grip_delta, sizeof(delta));
+        if (g_vm_push > 0.001f) {
+            Mat4 push, combined;
+            translation(0.0f, 0.0f, g_vm_push, push);
+            multiply(delta, push, combined);
+            std::memcpy(delta, combined, sizeof(delta));
+        }
+    } else {
+        translation(0.0f, 0.0f, with_offset ? g_vm_push : 0.0f, delta);   // D3D view space: +z forward
+    }
 
     slot->key = p;
     slot->zoom = zoom;
@@ -1112,7 +1211,28 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         _snprintf_s(reply, n, _TRUNCATE, "ipd %.4f (%s)", g_ipd_world, g_ipd_manual ? "manual" : "auto");
         return true;
     }
-    if (!strcmp(cmd, "recenter")) { recenter(); _snprintf_s(reply, n, _TRUNCATE, "recentered"); return true; }
+    if (!strcmp(cmd, "recenter")) { recenter(); g_grip_calibrated = false; _snprintf_s(reply, n, _TRUNCATE, "recentered"); return true; }
+    if (!strcmp(cmd, "grip")) {
+        if (has1) {
+            if (!_stricmp(a1, "on"))  { g_grip_on = true;  g_grip_calibrated = false; }
+            else if (!_stricmp(a1, "off")) { g_grip_on = false; g_grip_calibrated = false; g_grip_active = false; }
+            else if (!_stricmp(a1, "left"))  { g_grip_hand = 0; g_grip_calibrated = false; }
+            else if (!_stricmp(a1, "right")) { g_grip_hand = 1; g_grip_calibrated = false; }
+            else if (!_stricmp(a1, "recal")) { g_grip_calibrated = false; }
+            else if (!_stricmp(a1, "scale")) { /* handled below */ }
+            else { g_grip_units_per_metre = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.05f), 20.0f); }
+        }
+        _snprintf_s(reply, n, _TRUNCATE, "grip %s hand=%s scale=%.2f calibrated=%d active=%d resets=%u ctl(l=%d r=%d)",
+                    g_grip_on ? "on" : "off", g_grip_hand ? "right" : "left", g_grip_units_per_metre,
+                    g_grip_calibrated ? 1 : 0, g_grip_active ? 1 : 0, g_grip_resets,
+                    vrtrack::controller_connected(0) ? 1 : 0, vrtrack::controller_connected(1) ? 1 : 0);
+        return true;
+    }
+    if (!strcmp(cmd, "gripsmooth")) {
+        if (has1) g_grip_smooth = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.0f), 1.0f);
+        _snprintf_s(reply, n, _TRUNCATE, "grip smoothing %.2f (0 = raw)", g_grip_smooth);
+        return true;
+    }
     if (!strcmp(cmd, "hide")) {
         if (!has1 || g_hide_n >= kMaxHidden) { _snprintf_s(reply, n, _TRUNCATE, "usage: hide <hash-prefix-hex> (%zu/%zu used)", g_hide_n, kMaxHidden); return true; }
         const size_t digits = strlen(a1) > 16 ? 16 : strlen(a1);
@@ -1167,6 +1287,11 @@ void status(FILE* f)
             g_vm_mode, g_vm_push, g_ownproj_on ? 1 : 0, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last, g_hidden_draws_last, g_hide_n);
     fprintf(f, "vm-hist view-space <0.1:%u <0.5:%u <1:%u <2:%u <5:%u >5:%u\n",
             g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2], g_vm_hist_last[3], g_vm_hist_last[4], g_vm_hist_last[5]);
+    fprintf(f, "grip: %s hand=%s calibrated=%d active=%d scale=%.2f smooth=%.2f resets=%u controllers(l=%d r=%d) delta=(%.3f %.3f %.3f)\n",
+            g_grip_on ? "on" : "off", g_grip_hand ? "right" : "left", g_grip_calibrated ? 1 : 0,
+            g_grip_active ? 1 : 0, g_grip_units_per_metre, g_grip_smooth, g_grip_resets,
+            vrtrack::controller_connected(0) ? 1 : 0, vrtrack::controller_connected(1) ? 1 : 0,
+            g_grip_delta[12], g_grip_delta[13], g_grip_delta[14]);
     fprintf(f, "camera eye=(%.2f %.2f %.2f) fwd=(%.3f %.3f %.3f)\n", g_eye[0], g_eye[1], g_eye[2], g_cam_rows[6], g_cam_rows[7], g_cam_rows[8]);
 }
 
