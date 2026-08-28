@@ -34,9 +34,24 @@ unsigned g_applied = 0, g_skipped = 0;
 
 std::string cfg_path() { return vrlog::module_dir() + "bfbc2vr.cfg"; }
 
+// A few sub-commands of an otherwise persistable verb are actions, not
+// settings. "aim recal" re-captures the pointing reference from where the
+// controller is RIGHT NOW - replaying that at startup would baseline against a
+// controller that has not been picked up yet.
+const char* const kTransientSub[] = { "recal", "recenter", "reset" };
+
 bool persistable(const char* cmd)
 {
     for (const char* v : kPersistable) if (_stricmp(cmd, v) == 0) return true;
+    return false;
+}
+
+bool transient_sub(const char* args)
+{
+    if (!args || !*args) return false;
+    char first[32] = {};
+    sscanf_s(args, "%31s", first, static_cast<unsigned>(sizeof(first)));
+    for (const char* v : kTransientSub) if (_stricmp(first, v) == 0) return true;
     return false;
 }
 
@@ -119,6 +134,7 @@ void apply_pending()
 void note(const char* cmd, const char* args)
 {
     if (!cmd || !persistable(cmd)) return;
+    if (transient_sub(args)) return;          // an action, not a setting
 
     std::string line = cmd;
     if (args && *args) { line += ' '; line += args; }
