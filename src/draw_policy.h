@@ -172,9 +172,14 @@ bool make_grip_delta(const m4::Mat4 head_view, const m4::Mat4 grip_view,
                      const m4::Mat4 ref_head_view, const m4::Mat4 ref_grip_view,
                      float units_per_metre, m4::Mat4 out);
 
-// A discontinuity this large between accepted samples means tracking glitched
-// or the weapon changed; the caller re-calibrates rather than teleporting the
-// weapon (BFVR uses 0.50 m).
-bool grip_delta_is_sane(const m4::Mat4 delta, float max_translation);
+// A discontinuity this large BETWEEN CONSECUTIVE ACCEPTED SAMPLES means
+// tracking glitched or the weapon changed; the caller re-calibrates rather
+// than teleporting the weapon (BFVR uses 0.50 m).
+//
+// Note it is the step, not the total offset from calibration: an earlier
+// version gated on the total and made the weapon snap whenever the hand
+// travelled half a metre from where it started, which is ordinary movement.
+bool grip_delta_step_is_sane(const m4::Mat4 previous, const m4::Mat4 current,
+                             float max_step);
 
 } // namespace drawpolicy

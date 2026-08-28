@@ -161,8 +161,11 @@ controller's motion instead of a constant.
   point maps to itself rather than asserting the translation is zero; the first version of that
   test asserted the wrong thing and the code was right.
 - Fail-closed: no actively-tracked pose (VALID alone is refused — OpenVR keeps reporting an
-  inferred pose after tracking loss), a non-invertible pose, or a jump over 0.5 m between
-  accepted samples drops back to the native weapon pose and re-calibrates.
+  inferred pose after tracking loss), a non-invertible pose, or a jump over 0.5 m **between
+  consecutive accepted samples** drops back to the native weapon pose and re-calibrates. That
+  gate was first written against the total offset from calibration, which made the weapon snap
+  every time the hand travelled half a metre from where it started - ordinary movement. It is
+  the per-frame step that indicates a glitch.
 
 **Scope, stated plainly:** this is *presentation only*. The engine still owns aim, firing,
 recoil, reload and projectiles, so the bullet does not follow the barrel. Making it do so needs

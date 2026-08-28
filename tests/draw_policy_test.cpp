@@ -321,8 +321,16 @@ static void test_grip_delta()
     openvr_pose_to_view(g1, G1);
     CHECK(make_grip_delta(H0, G1, H0, G0, 10.0f, d));
     CHECK_NEAR(at(d,3,0), 1.0f, 1e-3f);
-    CHECK(grip_delta_is_sane(d, 2.0f));
-    CHECK(!grip_delta_is_sane(d, 0.5f));
+
+    // 6. The gate is on the STEP between samples, not the distance from
+    //    calibration: a hand a long way from where it started is normal, a
+    //    hand that jumped a long way in one frame is a tracking glitch.
+    Mat4 a, b;
+    m4::translation(0.9f, 0.0f, 0.0f, a);      // 0.9 m from calibration
+    m4::translation(0.93f, 0.0f, 0.0f, b);     // 3 cm later
+    CHECK(grip_delta_step_is_sane(a, b, 0.5f));
+    m4::translation(1.8f, 0.0f, 0.0f, b);      // 0.9 m in one frame
+    CHECK(!grip_delta_step_is_sane(a, b, 0.5f));
 }
 
 int main()

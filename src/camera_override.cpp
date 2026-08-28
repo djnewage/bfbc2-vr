@@ -196,6 +196,8 @@ bool  g_grip_calibrated = false;
 float g_grip_ref_head[16] = {};
 float g_grip_ref_grip[16] = {};
 float g_grip_delta[16] = {};      // current, view space
+float g_grip_prev[16] = {};       // last accepted, for the discontinuity gate
+bool  g_grip_have_prev = false;
 bool  g_grip_active = false;      // a usable delta this frame
 unsigned g_grip_resets = 0;
 constexpr float kGripMaxJump = 0.5f;   // metres between accepted samples
@@ -439,6 +441,8 @@ void update_grip_delta()
         std::memcpy(g_grip_ref_grip, grip_view, sizeof(g_grip_ref_grip));
         g_grip_calibrated = true;
         identity(g_grip_delta);
+        identity(g_grip_prev);
+        g_grip_have_prev = true;
         g_grip_active = true;
         VRLOG("[grip] calibrated on the %s controller - the weapon now follows it",
               g_grip_hand ? "right" : "left");
@@ -453,12 +457,17 @@ void update_grip_delta()
         g_grip_calibrated = false; ++g_grip_resets;
         return;
     }
-    if (!drawpolicy::grip_delta_is_sane(delta, kGripMaxJump * g_grip_units_per_metre)) {
-        // Tracking glitch or a weapon change: recalibrate instead of teleporting.
-        g_grip_calibrated = false; ++g_grip_resets;
+    if (g_grip_have_prev &&
+        !drawpolicy::grip_delta_step_is_sane(reinterpret_cast<const float(&)[16]>(*g_grip_prev),
+                                             delta, kGripMaxJump * g_grip_units_per_metre)) {
+        // A jump this big in one frame is a tracking glitch, not a movement:
+        // recalibrate instead of teleporting the weapon.
+        g_grip_calibrated = false; g_grip_have_prev = false; ++g_grip_resets;
         VRLOG("[grip] discontinuity - recalibrating (%u)", g_grip_resets);
         return;
     }
+    std::memcpy(g_grip_prev, delta, sizeof(g_grip_prev));
+    g_grip_have_prev = true;
     if (g_grip_smooth > 0.001f) {
         const float a = (std::min)(g_grip_smooth, 1.0f);
         for (int i = 0; i < 16; ++i) g_grip_delta[i] += (delta[i] - g_grip_delta[i]) * a;
@@ -1218,7 +1227,7 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
             else if (!_stricmp(a1, "off")) { g_grip_on = false; g_grip_calibrated = false; g_grip_active = false; }
             else if (!_stricmp(a1, "left"))  { g_grip_hand = 0; g_grip_calibrated = false; }
             else if (!_stricmp(a1, "right")) { g_grip_hand = 1; g_grip_calibrated = false; }
-            else if (!_stricmp(a1, "recal")) { g_grip_calibrated = false; }
+            else if (!_stricmp(a1, "recal")) { g_grip_calibrated = false; g_grip_have_prev = false; }
             else if (!_stricmp(a1, "scale")) { /* handled below */ }
             else { g_grip_units_per_metre = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.05f), 20.0f); }
         }

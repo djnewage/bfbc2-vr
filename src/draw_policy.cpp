@@ -228,11 +228,13 @@ bool make_grip_delta(const Mat4 head_view, const Mat4 grip_view,
     return true;
 }
 
-bool grip_delta_is_sane(const Mat4 delta, float max_translation)
+bool grip_delta_step_is_sane(const Mat4 previous, const Mat4 current, float max_step)
 {
-    const float x = at(delta, 3, 0), y = at(delta, 3, 1), z = at(delta, 3, 2);
-    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return false;
-    return (x * x + y * y + z * z) <= max_translation * max_translation;
+    const float dx = at(current, 3, 0) - at(previous, 3, 0);
+    const float dy = at(current, 3, 1) - at(previous, 3, 1);
+    const float dz = at(current, 3, 2) - at(previous, 3, 2);
+    if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz)) return false;
+    return (dx * dx + dy * dy + dz * dz) <= max_step * max_step;
 }
 
 } // namespace drawpolicy
