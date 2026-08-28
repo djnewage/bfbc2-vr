@@ -78,7 +78,10 @@ bool head_frame(float& yaw, float& pitch, float pos[3]);
 // yaw error between that and the game's own aim - which in camera coordinates
 // is simply (0,0,1), so the body's world heading cancels. False when there is
 // no tracked controller or no reference.
-bool aim_error(float& yaw_error, float& pitch_error);
+// `reason` is set on failure: 1 no HMD, 2 no reference pose, 3 no tracked
+// controller, 4 pointing at the pole (no meaningful yaw). Collapsing these into
+// a bare false is what made "the aim loop did nothing" undiagnosable.
+bool aim_error(float& yaw_error, float& pitch_error, int& reason);
 
 // Remove a body rotation WE commanded from the presentation, so steering the
 // game's aim toward the gun does not swing the player's view. Deliberate turns

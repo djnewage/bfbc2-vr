@@ -1279,20 +1279,21 @@ bool headset_tangents(float& tan_half_h, float& tan_half_v)
     return true;
 }
 
-bool aim_error(float& yaw_error, float& pitch_error)
+bool aim_error(float& yaw_error, float& pitch_error, int& reason)
 {
-    yaw_error = 0.0f; pitch_error = 0.0f;
-    if (!g_hmd_active || !g_have_ref_pose) return false;
+    yaw_error = 0.0f; pitch_error = 0.0f; reason = 0;
+    if (!g_hmd_active) { reason = 1; return false; }
+    if (!g_have_ref_pose) { reason = 2; return false; }
     float pose[12];
-    if (!vrtrack::controller_pose(g_grip_hand, pose)) return false;
+    if (!vrtrack::controller_pose(g_grip_hand, pose)) { reason = 3; return false; }
 
     float dir[3];
-    if (!drawpolicy::controller_dir_in_body(pose, g_ref_head_pose, g_turn_yaw, dir)) return false;
+    if (!drawpolicy::controller_dir_in_body(pose, g_ref_head_pose, g_turn_yaw, dir)) { reason = 3; return false; }
 
     // The game's aim is (0,0,1) in camera coordinates, so the error is just
     // where the barrel points in that frame.
     const float h = std::sqrt(dir[0]*dir[0] + dir[2]*dir[2]);
-    if (h < 1e-3f) return false;              // straight up or down: no yaw meaning
+    if (h < 1e-3f) { reason = 4; return false; }   // straight up or down
     yaw_error = std::atan2(dir[0], dir[2]);
     pitch_error = std::atan2(dir[1], h);
     return true;

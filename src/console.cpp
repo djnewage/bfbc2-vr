@@ -3,6 +3,7 @@
 #include "vr_compositor.h"
 #include "memscan.h"
 #include "vrinput.h"
+#include "settings.h"
 #include "draw_diag.h"
 #include "logger.h"
 
@@ -26,6 +27,7 @@ void write_status()
     vrcomp::status(f);
     memscan::status(f);
     vrinput::status(f);
+    settings::status(f);
     fprintf(f, "census: %s\n", drawdiag::capturing() ? "capturing" : "idle");
     fclose(f);
 }
@@ -46,6 +48,7 @@ void run_line(const char* line)
     char reply[512] = {};
     bool handled = false;
     if (!strcmp(cmd, "status")) { handled = true; _snprintf_s(reply, sizeof(reply), _TRUNCATE, "status written"); }
+    else if (!strcmp(cmd, "save")) { settings::save(); handled = true; _snprintf_s(reply, sizeof(reply), _TRUNCATE, "settings written"); }
     else if (!strcmp(cmd, "census")) { drawdiag::request_capture(4); handled = true; _snprintf_s(reply, sizeof(reply), _TRUNCATE, "census requested"); }
     if (!handled) handled = camover::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = vrcomp::command(cmd, args, reply, sizeof(reply));
@@ -53,14 +56,34 @@ void run_line(const char* line)
     if (!handled) handled = vrinput::command(cmd, args, reply, sizeof(reply));
     if (!handled) _snprintf_s(reply, sizeof(reply), _TRUNCATE, "unknown command '%s'", cmd);
     VRLOG("[cmd] %s %s -> %s", cmd, args ? args : "", reply);
+
+    // One capture point for every setting there is. A command that the modules
+    // accepted, whose verb is persistable, is by definition a valid line to
+    // replay next launch - no per-module registration, and no second schema to
+    // keep in step with the commands.
+    if (handled) settings::note(cmd, args);
 }
 
 } // namespace
+
+// Settings are replayed here rather than in DllMain: this runs on a real frame,
+// so a replayed command cannot touch OpenVR or D3D from inside loader lock.
+// One frame late is harmless for what these set.
+void run_line_external(const char* line)
+{
+    if (line && *line) run_line(line);
+}
 
 void on_present()
 {
     static unsigned frame = 0;
     ++frame;
+
+    static bool s_settings_applied = false;
+    if (!s_settings_applied) {
+        s_settings_applied = true;
+        settings::apply_pending();
+    }
 
     // Every frame: hunt state machines, locks, watches.
     memscan::on_present();

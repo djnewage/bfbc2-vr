@@ -11,6 +11,7 @@
 #include "vrinput.h"
 #include "dinput8_proxy.h"
 #include "input_bus.h"
+#include "settings.h"
 #include "wrappers.h"
 
 #include <windows.h>
@@ -106,6 +107,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         VRLOG("[init] bfbc2vr %s role attached to process %lu",
               g_input_role ? "INPUT (dinput8)" : "renderer (d3d9)", GetCurrentProcessId());
         if (g_input_role) dinput8proxy::init();
+        // Parse only - replay happens on the first frame (see console.cpp).
+        // The input role has no user settings of its own today.
+        else settings::load();
         break;
     case DLL_PROCESS_DETACH:
         VRLOG("[init] detaching");

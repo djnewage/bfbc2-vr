@@ -23,6 +23,7 @@ add_library(d3d9 SHARED
     src/memscan.cpp
     src/os_input.cpp
     src/input_bus.cpp
+    src/settings.cpp
     src/dinput8_proxy.cpp
     src/aim_policy.cpp
     src/vrinput.cpp

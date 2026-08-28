@@ -20,4 +20,9 @@ namespace vrcmd {
 // Poll the command file (every few frames) and refresh the status file.
 void on_present();
 
+// Run one command line, as if it had arrived through bfbc2vr_cmd.txt. Used by
+// the settings loader to replay stored settings through the same dispatcher
+// that created them.
+void run_line_external(const char* line);
+
 } // namespace vrcmd

@@ -102,7 +102,26 @@ float g_aim_max_error = 1.05f;       // rad (~60 deg): beyond this something is
                                      // out of sync - stop chasing, do not spin
 float g_aim_residue = 0.0f;          // sub-count carry, or small errors would
                                      // round to zero and never converge
-unsigned g_aim_emits = 0, g_aim_blocked = 0;
+// One counter per reason the loop can decline. "Nothing happened and I cannot
+// tell why" was costing a full relaunch per diagnosis, so every early return is
+// named and counted, and the non-zero ones are logged periodically.
+enum AimWhy {
+    kAimDisabled = 0, kAimStaleSample, kAimTurnSettling, kAimNoHmd, kAimNoReference,
+    kAimNoController, kAimPole, kAimErrorCap, kAimDeadzone, kAimZeroCounts,
+    kAimNotForeground, kAimGatedOff, kAimWhyCount
+};
+const char* const kAimWhyName[kAimWhyCount] = {
+    "disabled", "stale-sample", "turn-settling", "no-hmd", "no-reference",
+    "no-controller", "pole", "error-cap", "deadzone", "zero-counts",
+    "not-foreground", "gated-off"
+};
+unsigned g_aim_why[kAimWhyCount] = {};
+unsigned g_aim_emits = 0;
+// Why on_present() itself declined, which also suppresses aim.
+unsigned g_gate_disabled = 0, g_gate_not_foreground = 0, g_gate_no_controllers = 0;
+// Silent paths in the turn machinery. `no-response` means the injection never
+// reached the game - the single most diagnostic failure in this subsystem.
+unsigned g_turn_no_camera = 0, g_turn_busy = 0, g_turn_no_response = 0, g_turn_measured = 0;
 float g_aim_last_error = 0.0f;
 unsigned g_aim_last_seq = 0;         // one correction per FRESH controller sample
 float g_stick_on = 0.35f, g_stick_off = 0.25f;
@@ -150,23 +169,24 @@ void hold_mouse(bool& state, bool want, bool right)
 }
 
 void update_aim(int hand);   // defined below, used by on_present
+bool turn_body(float radians);
 
 int weapon_hand() { return g_swap_hands ? 0 : 1; }
 int move_hand()   { return g_swap_hands ? 1 : 0; }
 
 // Turn the body by `radians` through the game's own mouse look, and use the
 // result to refine the counts-per-radian estimate.
-void turn_body(float radians)
+bool turn_body(float radians)
 {
-    if (!std::isfinite(radians) || std::fabs(radians) < 1e-4f) return;
-    if (g_pending.active) return;               // one measurement at a time
+    if (!std::isfinite(radians) || std::fabs(radians) < 1e-4f) return false;
+    if (g_pending.active) { ++g_turn_busy; return false; }   // one measurement at a time
 
     float yaw = 0.0f, pitch = 0.0f;
-    if (!camover::game_camera_angles(yaw, pitch)) return;
+    if (!camover::game_camera_angles(yaw, pitch)) { ++g_turn_no_camera; return false; }
 
     const float counts = radians * g_counts_per_rad * g_turn_sign;
     const int dx = static_cast<int>(counts >= 0.0f ? counts + 0.5f : counts - 0.5f);
-    if (dx == 0) return;
+    if (dx == 0) return false;
 
     g_pending.active = true;
     g_pending.counts = static_cast<float>(dx);
@@ -175,6 +195,7 @@ void turn_body(float radians)
     g_pending.frames = 0;
     if (use_dinput()) inputbus::add_impulse(dx, 0);
     else              osinput::send_mouse_move(dx, 0);
+    return true;
 }
 
 // Watch for the body to respond, then update the estimate.
@@ -182,7 +203,7 @@ void settle_turn()
 {
     if (!g_pending.active) return;
     float yaw = 0.0f, pitch = 0.0f;
-    if (!camover::game_camera_angles(yaw, pitch)) { g_pending.active = false; return; }
+    if (!camover::game_camera_angles(yaw, pitch)) { g_pending.active = false; ++g_turn_no_camera; return; }
 
     ++g_pending.frames;
     const float moved = aimpolicy::body_delta(yaw, g_pending.yaw_before);
@@ -193,7 +214,9 @@ void settle_turn()
     if (std::fabs(moved) < 1e-3f) {
         // The camera did not move at all. Either the injected motion never
         // reached the game, or the player is in a menu/dead. Do not poison the
-        // estimate with it.
+        // estimate with it - and count it, because "we asked and nothing
+        // happened" is the most diagnostic failure this subsystem has.
+        ++g_turn_no_response;
         return;
     }
     // Sign first: which way does a positive dx actually turn the body?
@@ -212,6 +235,7 @@ void settle_turn()
     // already rejected above.
     g_counts_per_rad = g_gain_measured ? (g_counts_per_rad * 0.75f + ratio * 0.25f) : ratio;
     ++g_gain_samples;
+    ++g_turn_measured;
     if (!g_gain_measured) {
         g_gain_measured = true;
         VRLOG("[turn] mouse gain measured: %.0f counts per radian (%.1f per degree)",
@@ -233,25 +257,30 @@ void publish()
 // Steer the game's aim toward where the controller points.
 void update_aim(int hand)
 {
-    if (!g_aim_on) return;
+    if (!g_aim_on) { ++g_aim_why[kAimDisabled]; return; }
 
     // One correction per fresh controller sample. Present runs faster than the
     // runtime produces poses, and without this every correction is emitted
     // twice - the single biggest source of oscillation in a loop like this.
     const unsigned seq = vrtrack::controller_sequence(hand);
-    if (seq == g_aim_last_seq) return;
+    if (seq == g_aim_last_seq) { ++g_aim_why[kAimStaleSample]; return; }
     g_aim_last_seq = seq;
 
     // Never fight a turn that is still settling, or the measurement and the
     // correction end up chasing each other.
-    if (g_pending.active) { ++g_aim_blocked; return; }
+    if (g_pending.active) { ++g_aim_why[kAimTurnSettling]; return; }
 
     float err_yaw = 0.0f, err_pitch = 0.0f;
-    if (!camover::aim_error(err_yaw, err_pitch)) { ++g_aim_blocked; return; }
+    int reason = 0;
+    if (!camover::aim_error(err_yaw, err_pitch, reason)) {
+        static const AimWhy map[5] = { kAimNoController, kAimNoHmd, kAimNoReference, kAimNoController, kAimPole };
+        ++g_aim_why[map[(reason >= 0 && reason < 5) ? reason : 0]];
+        return;
+    }
     g_aim_last_error = err_yaw;
 
-    if (std::fabs(err_yaw) > g_aim_max_error) { ++g_aim_blocked; return; }
-    if (std::fabs(err_yaw) < g_aim_deadzone) { g_aim_residue = 0.0f; return; }
+    if (std::fabs(err_yaw) > g_aim_max_error) { ++g_aim_why[kAimErrorCap]; return; }
+    if (std::fabs(err_yaw) < g_aim_deadzone) { g_aim_residue = 0.0f; ++g_aim_why[kAimDeadzone]; return; }
 
     float step = err_yaw * g_aim_kp;
     step = (std::min)((std::max)(step, -g_aim_max_step), g_aim_max_step);
@@ -262,11 +291,11 @@ void update_aim(int hand)
     const float want = step * g_counts_per_rad * g_turn_sign + g_aim_residue;
     const int counts = static_cast<int>(want);
     g_aim_residue = want - static_cast<float>(counts);
-    if (counts == 0) return;
+    if (counts == 0) { ++g_aim_why[kAimZeroCounts]; return; }
 
     if (use_dinput()) inputbus::add_impulse(counts, 0);
     else if (osinput::game_is_foreground()) osinput::send_mouse_move(counts, 0);
-    else { ++g_aim_blocked; return; }
+    else { ++g_aim_why[kAimNotForeground]; return; }
     ++g_aim_emits;
 
     // Hold the view still. Compensate what was ACTUALLY EMITTED - the rounded
@@ -323,10 +352,27 @@ void on_present()
     // that path does not need it.
     const bool may_inject = use_dinput() ? true : g_foreground;
     if (!g_enabled || !may_inject || !any_valid) {
+        if (!g_enabled) ++g_gate_disabled;
+        else if (!any_valid) ++g_gate_no_controllers;
+        else ++g_gate_not_foreground;
+        ++g_aim_why[kAimGatedOff];
         release_all();
         return;
     }
     ++g_frames_injected;
+
+    // A play session must be diagnosable from the log alone: live status is
+    // useless while the player is alt-tabbed, because the game unacquires
+    // DirectInput the moment it loses focus.
+    if (g_aim_on && (g_frames_injected % 600) == 0) {
+        char why[256] = {}; size_t off = 0;
+        for (int i = 0; i < kAimWhyCount; ++i) {
+            if (!g_aim_why[i]) continue;
+            off += _snprintf_s(why + off, sizeof(why) - off, _TRUNCATE, " %s=%u", kAimWhyName[i], g_aim_why[i]);
+        }
+        VRLOG("[aim] emits=%u error=%+.1f deg gain=%.0f |%s", g_aim_emits,
+              g_aim_last_error * 180.0f / aimpolicy::kPi, g_counts_per_rad, why[0] ? why : " (nothing declined)");
+    }
 
     const int mh = move_hand(), wh = weapon_hand();
 
@@ -387,8 +433,9 @@ void on_present()
     settle_turn();
     const int step = aimpolicy::snap_turn_step(g_in[wh].stick[0], g_snap);
     if (step != 0) {
-        turn_body(static_cast<float>(step) * g_snap_degrees * aimpolicy::kPi / 180.0f);
-        ++g_snaps;
+        // Count only turns that were actually emitted: the counter used to rise
+        // even when turn_body bailed, which made it lie about what happened.
+        if (turn_body(static_cast<float>(step) * g_snap_degrees * aimpolicy::kPi / 180.0f)) ++g_snaps;
     }
 }
 
@@ -428,10 +475,14 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
                 if (b2[0]) g_aim_deadzone = (std::min)((std::max)(static_cast<float>(atof(b2)), 0.0f), 0.2f);
             }
         }
+        // Report the top reason it declined, not a single opaque count.
+        int top = -1; unsigned topn = 0;
+        for (int i = 0; i < kAimWhyCount; ++i) if (g_aim_why[i] > topn) { topn = g_aim_why[i]; top = i; }
         _snprintf_s(reply, n, _TRUNCATE,
-                    "aim %s kp=%.2f deadzone=%.1f deg error=%.1f deg emits=%u blocked=%u gain=%.0f",
+                    "aim %s kp=%.2f deadzone=%.1f deg error=%.1f deg emits=%u gain=%.0f top-block=%s(%u)",
                     g_aim_on ? "on" : "off", g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
-                    g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits, g_aim_blocked, g_counts_per_rad);
+                    g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits, g_counts_per_rad,
+                    top >= 0 ? kAimWhyName[top] : "none", topn);
         return true;
     }
     if (!strcmp(cmd, "path")) {
@@ -550,9 +601,15 @@ void status(FILE* f)
                 g_turn_sign, g_pending.active ? 1 : 0,
                 yaw * 180.0f / aimpolicy::kPi, pitch * 180.0f / aimpolicy::kPi, had ? "" : " (none)");
     }
-    fprintf(f, "  aim: %s kp=%.2f deadzone=%.2f deg yaw-error=%+.1f deg emits=%u blocked=%u\n",
+    fprintf(f, "  aim: %s kp=%.2f deadzone=%.2f deg yaw-error=%+.1f deg emits=%u\n",
             g_aim_on ? "ON" : "off", g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
-            g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits, g_aim_blocked);
+            g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits);
+    fprintf(f, "  aim why:");
+    for (int i = 0; i < kAimWhyCount; ++i) if (g_aim_why[i]) fprintf(f, " %s=%u", kAimWhyName[i], g_aim_why[i]);
+    fprintf(f, "\n");
+    fprintf(f, "  gate: disabled=%u not-foreground=%u no-controllers=%u | turn: busy=%u no-camera=%u no-response=%u measured=%u\n",
+            g_gate_disabled, g_gate_not_foreground, g_gate_no_controllers,
+            g_turn_busy, g_turn_no_camera, g_turn_no_response, g_turn_measured);
     fprintf(f, "  held: w=%d a=%d s=%d d=%d sprint=%d crouch=%d fire=%d ads=%d reload=%d jump=%d\n",
             g_held.keys.forward, g_held.keys.left, g_held.keys.back, g_held.keys.right,
             g_held.sprint, g_held.crouch, g_held.fire, g_held.ads, g_held.reload, g_held.jump);
