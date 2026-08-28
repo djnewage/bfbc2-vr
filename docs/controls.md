@@ -39,7 +39,23 @@ Commands: `input on|off|left|right`, `snap <degrees>`, `deadzone <0..1>`. Every 
 buttons, sticks, triggers and the currently held keys appear in `bfbc2vr_status.txt`, so
 bindings can be verified from outside the headset.
 
-## Snap turn is a view rotation, not a mouse turn
+## Snap turn moves the BODY (corrected 2026-08-27)
+
+The first version rotated only the presented view, leaving the game's body facing its original
+direction. In the headset the world turned — but the engine's aim never did, so **every shot
+went to the same place regardless of which way the player faced**. A turn has to be a real turn.
+
+Snap turn now drives the game's own mouse look, and the view follows for free because the view
+is built on the game camera. That requires mouse counts per radian, which depends on the
+player's in-game sensitivity and is not readable from the config, so it is **measured**: emit a
+known delta, watch how far the body actually turned, low-pass the ratio. The direction a
+positive `dx` turns is resolved the same way rather than assumed. Until the first measurement
+lands a conservative bootstrap is used, so a wrong guess under-turns instead of spinning.
+
+`gain` reports and overrides it; `mouse <dx> <dy>` is the raw diagnostic for the underlying
+question — does injected relative motion reach this game at all.
+
+## Superseded: snap turn as a view rotation
 
 `camover::request_turn()` moves the HMD reference yaw, so the world turns under a stationary
 body. Two reasons this matters:

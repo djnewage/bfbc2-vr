@@ -19,6 +19,40 @@ using aimpolicy::StickKeys;
 bool  g_enabled = false;          // opt-in: 'input on'
 bool  g_swap_hands = false;       // left-handed mirror
 float g_snap_degrees = 30.0f;
+
+// TURNING MOVES THE BODY, not just the view.
+//
+// The first version rotated only the presented view (the HMD reference yaw)
+// and left the game's body facing its original direction. The world turned,
+// but the engine's aim never did - so every shot went to the same place no
+// matter which way the player faced. A turn has to be a real turn: drive the
+// game's own mouse look, and the view follows because the view is built on the
+// game camera.
+//
+// That needs mouse counts per radian, which depends on the player's in-game
+// sensitivity and cannot be read from the config (Sensitivity0=0.53 and
+// Scheme0Sensitivity=0.35 are not interpretable). So it is MEASURED: emit a
+// known number of counts, watch how far the game camera actually turned, and
+// low-pass the ratio. Until the first measurement lands, a conservative
+// bootstrap is used - a wrong guess then under-turns rather than spinning.
+float g_counts_per_rad = 1500.0f;
+bool  g_gain_measured = false;
+unsigned g_gain_samples = 0;
+float g_turn_sign = 1.0f;          // +1 if positive dx turns the same way as +yaw
+bool  g_turn_sign_known = false;
+
+// One measurement in flight: counts we asked for, the body yaw before, and how
+// long we are prepared to wait for the game to respond.
+struct PendingTurn {
+    bool  active = false;
+    float counts = 0.0f;
+    float want_radians = 0.0f;
+    float yaw_before = 0.0f;
+    int   frames = 0;
+};
+PendingTurn g_pending;
+constexpr int kTurnSettleFrames = 8;
+float g_last_measured_ratio = 0.0f;
 float g_stick_on = 0.35f, g_stick_off = 0.25f;
 float g_trigger_threshold = 0.6f;
 
@@ -65,6 +99,70 @@ void hold_mouse(bool& state, bool want, bool right)
 
 int weapon_hand() { return g_swap_hands ? 0 : 1; }
 int move_hand()   { return g_swap_hands ? 1 : 0; }
+
+// Turn the body by `radians` through the game's own mouse look, and use the
+// result to refine the counts-per-radian estimate.
+void turn_body(float radians)
+{
+    if (!std::isfinite(radians) || std::fabs(radians) < 1e-4f) return;
+    if (g_pending.active) return;               // one measurement at a time
+
+    float yaw = 0.0f, pitch = 0.0f;
+    if (!camover::game_camera_angles(yaw, pitch)) return;
+
+    const float counts = radians * g_counts_per_rad * g_turn_sign;
+    const int dx = static_cast<int>(counts >= 0.0f ? counts + 0.5f : counts - 0.5f);
+    if (dx == 0) return;
+
+    g_pending.active = true;
+    g_pending.counts = static_cast<float>(dx);
+    g_pending.want_radians = radians;
+    g_pending.yaw_before = yaw;
+    g_pending.frames = 0;
+    osinput::send_mouse_move(dx, 0);
+}
+
+// Watch for the body to respond, then update the estimate.
+void settle_turn()
+{
+    if (!g_pending.active) return;
+    float yaw = 0.0f, pitch = 0.0f;
+    if (!camover::game_camera_angles(yaw, pitch)) { g_pending.active = false; return; }
+
+    ++g_pending.frames;
+    const float moved = aimpolicy::body_delta(yaw, g_pending.yaw_before);
+    const bool enough = std::fabs(moved) > 0.5f * std::fabs(g_pending.want_radians);
+    if (!enough && g_pending.frames < kTurnSettleFrames) return;
+
+    g_pending.active = false;
+    if (std::fabs(moved) < 1e-3f) {
+        // The camera did not move at all. Either the injected motion never
+        // reached the game, or the player is in a menu/dead. Do not poison the
+        // estimate with it.
+        return;
+    }
+    // Sign first: which way does a positive dx actually turn the body?
+    if (!g_turn_sign_known) {
+        const bool same = (moved > 0.0f) == (g_pending.want_radians > 0.0f);
+        if (!same) g_turn_sign = -g_turn_sign;
+        g_turn_sign_known = true;
+        VRLOG("[turn] mouse dx sign resolved: %+.0f (asked %+.1f deg, body moved %+.1f deg)",
+              g_turn_sign, g_pending.want_radians * 180.0f / aimpolicy::kPi,
+              moved * 180.0f / aimpolicy::kPi);
+    }
+    const float ratio = std::fabs(g_pending.counts) / std::fabs(moved);
+    if (!std::isfinite(ratio) || ratio < 50.0f || ratio > 100000.0f) return;
+    g_last_measured_ratio = ratio;
+    // Median-free EMA: this is a slowly varying quantity and the outliers are
+    // already rejected above.
+    g_counts_per_rad = g_gain_measured ? (g_counts_per_rad * 0.75f + ratio * 0.25f) : ratio;
+    ++g_gain_samples;
+    if (!g_gain_measured) {
+        g_gain_measured = true;
+        VRLOG("[turn] mouse gain measured: %.0f counts per radian (%.1f per degree)",
+              g_counts_per_rad, g_counts_per_rad * aimpolicy::kPi / 180.0f);
+    }
+}
 
 } // namespace
 
@@ -128,15 +226,13 @@ void on_present()
     hold_key(g_held.use,    pressed(mh, kMaskB), 'E');
     hold_key(g_held.melee,  pressed(wh, kMaskStickClick), 'F');
 
-    // Snap turn. This is a VIEW rotation, not a mouse turn: the reference yaw
-    // moves, so the world turns under a stationary body. When the aim loop
-    // lands (stage 2) it will walk the body around to follow the gun, and its
-    // compensation term is opposite-signed into this same accumulator, so the
-    // two can never cancel each other.
+    // Snap turn: a real turn of the BODY through the game's own mouse look, so
+    // the aim turns with it. The view follows for free, because the view is
+    // built on the game camera.
+    settle_turn();
     const int step = aimpolicy::snap_turn_step(g_in[wh].stick[0], g_snap);
     if (step != 0) {
-        const float requested = static_cast<float>(step) * g_snap_degrees * aimpolicy::kPi / 180.0f;
-        camover::request_turn(requested);
+        turn_body(static_cast<float>(step) * g_snap_degrees * aimpolicy::kPi / 180.0f);
         ++g_snaps;
     }
 }
@@ -165,6 +261,31 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         _snprintf_s(reply, n, _TRUNCATE, "snap turn %.0f degrees", g_snap_degrees);
         return true;
     }
+    if (!strcmp(cmd, "mouse")) {
+        // Diagnostic: does injected relative mouse motion reach the game at
+        // all? Emits a raw delta and reports how far the body actually turned.
+        char b1[16] = {}, b2[16] = {};
+        if (args) sscanf_s(args, "%15s %15s", b1, static_cast<unsigned>(sizeof(b1)), b2, static_cast<unsigned>(sizeof(b2)));
+        float before = 0.0f, p = 0.0f;
+        const bool had = camover::game_camera_angles(before, p);
+        const int dx = b1[0] ? atoi(b1) : 200;
+        const int dy = b2[0] ? atoi(b2) : 0;
+        if (!osinput::game_is_foreground()) { _snprintf_s(reply, n, _TRUNCATE, "mouse: game not foreground - refusing"); return true; }
+        osinput::send_mouse_move(dx, dy);
+        _snprintf_s(reply, n, _TRUNCATE, "mouse: sent dx=%d dy=%d (body yaw before %.2f deg%s) - re-run 'status' to see the result",
+                    dx, dy, before * 180.0f / aimpolicy::kPi, had ? "" : ", NO CAMERA");
+        return true;
+    }
+    if (!strcmp(cmd, "gain")) {
+        if (has1) {
+            g_counts_per_rad = (std::min)((std::max)(static_cast<float>(atof(a1)), 50.0f), 100000.0f);
+            g_gain_measured = true;
+        }
+        _snprintf_s(reply, n, _TRUNCATE, "mouse gain %.0f counts/rad (%.1f/deg) measured=%d samples=%u sign=%+.0f",
+                    g_counts_per_rad, g_counts_per_rad * aimpolicy::kPi / 180.0f,
+                    g_gain_measured ? 1 : 0, g_gain_samples, g_turn_sign);
+        return true;
+    }
     if (!strcmp(cmd, "deadzone")) {
         if (has1) {
             g_stick_on = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.05f), 0.9f);
@@ -186,6 +307,14 @@ void status(FILE* f)
                 h ? "right" : "left", g_in[h].valid ? 1 : 0,
                 static_cast<unsigned long long>(g_in[h].buttons),
                 g_in[h].stick[0], g_in[h].stick[1], g_in[h].trigger, g_in[h].grip);
+    }
+    {
+        float yaw = 0.0f, pitch = 0.0f;
+        const bool had = camover::game_camera_angles(yaw, pitch);
+        fprintf(f, "  turn: gain=%.0f counts/rad (measured=%d, %u samples, last ratio %.0f) sign=%+.0f pending=%d  body yaw=%.1f pitch=%.1f deg%s\n",
+                g_counts_per_rad, g_gain_measured ? 1 : 0, g_gain_samples, g_last_measured_ratio,
+                g_turn_sign, g_pending.active ? 1 : 0,
+                yaw * 180.0f / aimpolicy::kPi, pitch * 180.0f / aimpolicy::kPi, had ? "" : " (none)");
     }
     fprintf(f, "  held: w=%d a=%d s=%d d=%d sprint=%d crouch=%d fire=%d ads=%d reload=%d jump=%d\n",
             g_held.keys.forward, g_held.keys.left, g_held.keys.back, g_held.keys.right,
