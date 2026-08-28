@@ -351,28 +351,38 @@ void on_present()
     // is active. Injecting through DirectInput cannot reach another process, so
     // that path does not need it.
     const bool may_inject = use_dinput() ? true : g_foreground;
-    if (!g_enabled || !may_inject || !any_valid) {
-        if (!g_enabled) ++g_gate_disabled;
-        else if (!any_valid) ++g_gate_no_controllers;
-        else ++g_gate_not_foreground;
-        ++g_aim_why[kAimGatedOff];
-        release_all();
-        return;
-    }
-    ++g_frames_injected;
 
-    // A play session must be diagnosable from the log alone: live status is
-    // useless while the player is alt-tabbed, because the game unacquires
-    // DirectInput the moment it loses focus.
-    if (g_aim_on && (g_frames_injected % 600) == 0) {
+    // Diagnostics FIRST, and unconditionally: the summary used to live past
+    // this gate, so it only ever logged when the loop was already running -
+    // useless precisely when something is wrong. A whole play session produced
+    // no [aim] lines because of that.
+    static unsigned s_frames = 0;
+    if ((++s_frames % 600) == 0) {
         char why[256] = {}; size_t off = 0;
         for (int i = 0; i < kAimWhyCount; ++i) {
             if (!g_aim_why[i]) continue;
             off += _snprintf_s(why + off, sizeof(why) - off, _TRUNCATE, " %s=%u", kAimWhyName[i], g_aim_why[i]);
         }
-        VRLOG("[aim] emits=%u error=%+.1f deg gain=%.0f |%s", g_aim_emits,
-              g_aim_last_error * 180.0f / aimpolicy::kPi, g_counts_per_rad, why[0] ? why : " (nothing declined)");
+        VRLOG("[aim] enabled=%d emits=%u err=%+.1f deg | buttons(l=%d r=%d) fg=%d dinput=%d hook=%d |%s",
+              g_aim_on ? 1 : 0, g_aim_emits, g_aim_last_error * 180.0f / aimpolicy::kPi,
+              g_in[0].valid ? 1 : 0, g_in[1].valid ? 1 : 0, g_foreground ? 1 : 0,
+              use_dinput() ? 1 : 0, dinput_live() ? 1 : 0, why[0] ? why : " (nothing declined)");
     }
+
+    // The aim loop needs only the controller POSE, which is a different source
+    // from the legacy button/stick read below. Gating it on that read meant a
+    // controller whose buttons we cannot see silently disabled aiming even
+    // though its pose was tracked perfectly - which is exactly what happened.
+    if (g_enabled && may_inject) update_aim(weapon_hand());
+
+    if (!g_enabled || !may_inject || !any_valid) {
+        if (!g_enabled) ++g_gate_disabled;
+        else if (!any_valid) ++g_gate_no_controllers;
+        else ++g_gate_not_foreground;
+        release_all();
+        return;
+    }
+    ++g_frames_injected;
 
     const int mh = move_hand(), wh = weapon_hand();
 
@@ -422,10 +432,6 @@ void on_present()
     } else {
         g_held.keys = want;   // keep the hysteresis state coherent across a switch
     }
-
-    // Body follows gun. Runs before the snap turn so a deliberate turn always
-    // wins the frame it is requested in.
-    update_aim(wh);
 
     // Snap turn: a real turn of the BODY through the game's own mouse look, so
     // the aim turns with it. The view follows for free, because the view is
