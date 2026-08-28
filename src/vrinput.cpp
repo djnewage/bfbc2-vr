@@ -270,7 +270,11 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         const bool had = camover::game_camera_angles(before, p);
         const int dx = b1[0] ? atoi(b1) : 200;
         const int dy = b2[0] ? atoi(b2) : 0;
-        if (!osinput::game_is_foreground()) { _snprintf_s(reply, n, _TRUNCATE, "mouse: game not foreground - refusing"); return true; }
+        // An explicit one-shot diagnostic may bring the game forward itself -
+        // that is the difference between focus_game() and the per-frame
+        // game_is_foreground() gate. Without this the test can never run,
+        // because whoever asks for it is by definition in another window.
+        if (!osinput::focus_game()) { _snprintf_s(reply, n, _TRUNCATE, "mouse: could not focus the game - refusing to inject"); return true; }
         osinput::send_mouse_move(dx, dy);
         _snprintf_s(reply, n, _TRUNCATE, "mouse: sent dx=%d dy=%d (body yaw before %.2f deg%s) - re-run 'status' to see the result",
                     dx, dy, before * 180.0f / aimpolicy::kPi, had ? "" : ", NO CAMERA");
