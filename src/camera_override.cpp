@@ -65,7 +65,19 @@ bool  g_have_ref_pose = false;
 // Deliberate turns (snap turn) rotate the virtual body by this much. It used
 // to be folded into g_ref_yaw; with a full-orientation reference it has to be
 // its own term, or a turn would be indistinguishable from a head movement.
+// Deliberate body turns (snap turn): the view is MEANT to follow these, and
+// they must never be clamped or bled away.
 float g_turn_yaw = 0.0f;
+
+// The aim loop's view-hold offset: how far the presented view leads the body
+// because the aim loop turned the body under it. Opposite in intent to
+// g_turn_yaw - the view must NOT follow - which is why the two cannot share one
+// variable. They did, and the result was that a snap turn and an aim turn moved
+// the same number in opposite directions.
+float g_aim_view_offset = 0.0f;
+
+// What the view actually uses: both contributions together.
+float view_turn_yaw() { return g_turn_yaw + g_aim_view_offset; }
 
 // The controller direction that means "aligned with the game's aim", captured
 // rather than assumed. Without it the raw grip axis was treated as the barrel -
@@ -589,7 +601,7 @@ void rebuild_correction()
     bool have_full = false;
     float head_now[12];
     if (g_hmd_active && g_full_orientation && g_have_ref_pose && head_pose_now(head_now)) {
-        have_full = drawpolicy::head_world_rotation(head_now, g_ref_head_pose, g_turn_yaw,
+        have_full = drawpolicy::head_world_rotation(head_now, g_ref_head_pose, view_turn_yaw(),
                                                     g_cam_rows, rot);
     }
     if (!have_full) {
@@ -599,7 +611,7 @@ void rebuild_correction()
             // if the full path ever refuses.
             const float wy[3] = { 0.0f, 1.0f, 0.0f };
             Mat4 ry, rp;
-            rotation_axis(wy, g_yaw_sign * (g_hmd_yaw + g_turn_yaw), ry);
+            rotation_axis(wy, g_yaw_sign * (g_hmd_yaw + view_turn_yaw()), ry);
             rotation_axis(g_cam_right, g_pitch_sign * g_hmd_pitch, rp);
             multiply(rp, ry, rot);
         } else {
@@ -624,7 +636,7 @@ void rebuild_correction()
         // reference happened to face the tracking origin's forward; at any
         // other heading, leaning sideways slid the player the wrong way.
         if (!(g_have_ref_pose &&
-              drawpolicy::lean_in_world(g_hmd_dpos, g_ref_head_pose, g_turn_yaw, g_cam_rows, off))) {
+              drawpolicy::lean_in_world(g_hmd_dpos, g_ref_head_pose, view_turn_yaw(), g_cam_rows, off))) {
             const float* right = &g_cam_rows[0];
             const float* up    = &g_cam_rows[3];
             const float* fwd   = &g_cam_rows[6];
@@ -654,7 +666,7 @@ void rebuild_correction()
         // stereo baseline with it, or the eyes stay level while the view rolls.
         float axis[3] = { g_cam_right[0], g_cam_right[1], g_cam_right[2] };
         if (!(g_have_ref_pose && head_pose_now(head_now) &&
-              drawpolicy::head_right_in_world(head_now, g_ref_head_pose, g_turn_yaw, g_cam_rows, axis))) {
+              drawpolicy::head_right_in_world(head_now, g_ref_head_pose, view_turn_yaw(), g_cam_rows, axis))) {
             axis[0] = g_cam_right[0]; axis[1] = g_cam_right[1]; axis[2] = g_cam_right[2];
         }
         Mat4 eye_shift, r2;
@@ -1080,6 +1092,7 @@ void recenter()
         std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
         g_have_ref_pose = head_reference_now(g_ref_head_pose);
         g_turn_yaw = 0.0f;
+        g_aim_view_offset = 0.0f;
         g_aim_ref_valid = false;          // the aim reference is relative to this
         VRLOG("[vr] reference recentered (full orientation%s + position)",
               g_have_ref_pose ? "" : " UNAVAILABLE - falling back to yaw/pitch");
@@ -1144,6 +1157,8 @@ void on_present()
             std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
             g_have_ref_pose = head_reference_now(g_ref_head_pose);
             g_turn_yaw = 0.0f;
+            g_aim_view_offset = 0.0f;
+            g_aim_ref_valid = false;
             VRLOG("[vr] head tracking engaged (ref yaw=%.1f pitch=%.1f deg, pos %.2f/%.2f/%.2f)",
                   yaw * 180.0f / kPi, pitch * 180.0f / kPi, pos[0], pos[1], pos[2]);
         }
@@ -1330,16 +1345,37 @@ bool headset_tangents(float& tan_half_h, float& tan_half_v)
 // The controller's pointing direction in the body frame, in whatever axis the
 // runtime's pose happens to use - which is exactly why it is only ever compared
 // against a reference captured in the same axis.
+// Game camera yaw when the aim reference was captured. The body's rotation
+// since then is read from the camera rather than accumulated, because the
+// camera is ground truth: it already includes snap turns, the aim loop's own
+// turns, the player's mouse, and anything the game itself does to the heading.
+// Accumulating instead meant every turn the loop did not personally emit went
+// missing from the mapping.
+float g_aim_ref_cam_yaw = 0.0f;
+
 bool controller_dir_now(float out[3])
 {
     if (!g_have_ref_pose) return false;
     float pose[12];
     if (!vrtrack::controller_pose(g_grip_hand, pose)) return false;
-    return drawpolicy::controller_dir_in_body(pose, g_ref_head_pose, g_turn_yaw, out);
+
+    float cam_yaw = 0.0f, cam_pitch = 0.0f;
+    if (!game_camera_angles(cam_yaw, cam_pitch)) return false;
+    // Negated because the parameter carries the controller direction the
+    // opposite way to the body's own rotation.
+    const float body = -aimpolicy::wrap_pi(cam_yaw - g_aim_ref_cam_yaw);
+
+    return drawpolicy::controller_dir_in_body(pose, g_ref_head_pose, body, out);
 }
 
 void recalibrate_aim()
 {
+    // Snapshot the heading FIRST, so the direction is measured relative to the
+    // same instant it is stored against.
+    float cam_yaw = 0.0f, cam_pitch = 0.0f;
+    if (!game_camera_angles(cam_yaw, cam_pitch)) { g_aim_ref_valid = false; return; }
+    g_aim_ref_cam_yaw = cam_yaw;
+
     float dir[3];
     g_aim_ref_valid = controller_dir_now(dir);
     if (g_aim_ref_valid) {
@@ -1367,8 +1403,7 @@ bool aim_error(float& yaw_error, float& pitch_error, int& reason)
     if (!g_aim_ref_valid) {
         // The first usable sample DEFINES "aligned", instead of assuming the
         // pose's own forward axis is the barrel.
-        std::memcpy(g_aim_ref_dir, dir, sizeof(g_aim_ref_dir));
-        g_aim_ref_valid = true;
+        recalibrate_aim();
         VRLOG("[aim] reference captured on first sample");
         return false;                      // no correction on the baseline frame
     }
@@ -1394,17 +1429,17 @@ void compensate_aim_turn(float body_yaw_delta)
     // turn deliberately does NOT come through here.
     // Bounded: this is a standing divergence between what the player sees and
     // where their body faces, and unbounded it became a permanent one.
-    g_turn_yaw = aimpolicy::wrap_pi(g_turn_yaw - body_yaw_delta);
-    g_turn_yaw = (std::min)((std::max)(g_turn_yaw, -kMaxTurnOffset), kMaxTurnOffset);
+    g_aim_view_offset = aimpolicy::wrap_pi(g_aim_view_offset - body_yaw_delta);
+    g_aim_view_offset = (std::min)((std::max)(g_aim_view_offset, -kMaxTurnOffset), kMaxTurnOffset);
 }
 
 void bleed_turn_offset()
 {
     // Called while the aim loop is idle: let the view and body converge again,
     // slowly enough to be imperceptible.
-    if (g_turn_yaw > kTurnBleedPerFrame)       g_turn_yaw -= kTurnBleedPerFrame;
-    else if (g_turn_yaw < -kTurnBleedPerFrame) g_turn_yaw += kTurnBleedPerFrame;
-    else                                       g_turn_yaw = 0.0f;
+    if (g_aim_view_offset > kTurnBleedPerFrame)       g_aim_view_offset -= kTurnBleedPerFrame;
+    else if (g_aim_view_offset < -kTurnBleedPerFrame) g_aim_view_offset += kTurnBleedPerFrame;
+    else                                              g_aim_view_offset = 0.0f;
 }
 
 bool weapon_tangents(float& tan_half_h, float& tan_half_v)
@@ -1551,8 +1586,9 @@ void status(FILE* f)
     fprintf(f, "correct=%d hmd=%d eye=%d ipd=%.4f%s pos6dof=%d frame=%u modified/frame=%u\n",
             g_correct_on ? 1 : 0, g_hmd_active ? 1 : 0, g_frame_eye, g_ipd_world, g_ipd_manual ? "(manual)" : "",
             g_pos_enabled ? 1 : 0, g_frame_index, g_modified_last_frame);
-    fprintf(f, "head: full-orientation=%d ref-pose=%d turn-offset=%.1f deg\n",
-            g_full_orientation ? 1 : 0, g_have_ref_pose ? 1 : 0, g_turn_yaw * 180.0f / kPi);
+    fprintf(f, "head: full-orientation=%d ref-pose=%d turn=%.1f deg aim-view-offset=%.1f deg\n",
+            g_full_orientation ? 1 : 0, g_have_ref_pose ? 1 : 0,
+            g_turn_yaw * 180.0f / kPi, g_aim_view_offset * 180.0f / kPi);
     fprintf(f, "hmd yaw=%.1f pitch=%.1f deg  dpos=(%.3f %.3f %.3f)\n",
             yaw * 180.0f / kPi, pitch * 180.0f / kPi, g_hmd_dpos[0], g_hmd_dpos[1], g_hmd_dpos[2]);
     fprintf(f, "fov: auto=%d manual=%.2f widen=%.2f/%.2f  world tan=%.4f/%.4f near=%.3f far=%.1f (deg %.1f x %.1f)\n",

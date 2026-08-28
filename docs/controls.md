@@ -166,3 +166,35 @@ refused outright.
 
 `authority=` now appears in the status block, because "the loop is idle" and "the loop is declining
 because you are pointing at the sky" were indistinguishable from the counters alone.
+
+### One variable doing three jobs: why left/right was inconsistent
+
+Aiming left and right worked, then didn't, with no obvious pattern. `g_turn_yaw` was carrying
+three different quantities:
+
+1. `request_turn` (snap turn) did `g_turn_yaw += radians` - a deliberate body turn, and the view is
+   **meant** to follow it.
+2. `compensate_aim_turn` did `g_turn_yaw -= emitted` - the aim loop turned the body, and the view
+   must **not** follow.
+3. `controller_dir_in_body` read it as "how far the body has rotated since the reference", to map
+   the controller into the body frame and compute the aim error.
+
+Jobs 1 and 2 move the number in **opposite directions for the same physical event** (the body
+rotating), because they differ in whether the view should follow. So as a measure of body rotation
+- job 3 - it was simply wrong: snap turn left, then aim left, and the mapping was off by twice the
+snap. The clamp and the idle bleed added in the previous two commits then corrupted it further,
+each nudging a value the error measurement depended on.
+
+Split into two:
+
+- `g_turn_yaw` - deliberate turns only. Never clamped, never bled.
+- `g_aim_view_offset` - the aim loop's view-hold offset. Clamped to 25 deg and bled when idle.
+- `view_turn_yaw()` = their sum, which is what every view-side call site uses.
+
+(The clamp was also actively dangerous while shared: it bounded the *total*, so after a few snap
+turns the first aim correction would have yanked the view back to 25 deg.)
+
+And job 3 no longer accumulates anything. The body's rotation since the reference is now read from
+the **game camera**, which is ground truth and already reflects snap turns, the aim loop's own
+turns, the player's mouse, and anything the game does to the heading. Accumulating meant every turn
+the loop did not personally emit went missing from the mapping.
