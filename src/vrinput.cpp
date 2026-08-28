@@ -17,7 +17,9 @@ namespace {
 
 using aimpolicy::StickKeys;
 
-bool  g_enabled = false;          // opt-in: 'input on'
+// On by default now that the DirectInput path is proven in game. It only ever
+// injects while the controllers report valid poses, and 'input off' stops it.
+bool  g_enabled = true;
 
 // TRANSPORT. SendInput was the bootstrap: it needs the game focused, Windows
 // pointer acceleration distorts relative motion, and a stray moment types into

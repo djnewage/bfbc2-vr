@@ -211,7 +211,10 @@ float& g_vm_push = g_vm_off[2];   // '-'/'=' and the 'push' command drive z
 // projectiles - the bullet does not follow the barrel yet, and pretending
 // otherwise would be worse than not doing it. Fire direction needs either the
 // engine's fire basis or synthesised look input (docs/bc2-engine.md).
-bool  g_grip_on = false;          // 'grip on'
+// On by default: it is the headline feature, and requiring a command after
+// every launch meant a session where the gun simply sat still and looked
+// broken. 'grip off' still disables it.
+bool  g_grip_on = true;
 int   g_grip_hand = 1;            // 0 left, 1 right
 float g_grip_units_per_metre = 1.0f;   // Frostbite is metric
 float g_grip_smooth = 0.0f;       // 0 = raw; otherwise per-frame lerp factor
