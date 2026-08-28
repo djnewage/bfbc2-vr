@@ -151,6 +151,10 @@ public:
     HRESULT STDMETHODCALLTYPE GetDeviceData(DWORD cbData, LPDIDEVICEOBJECTDATA rgdod,
                                             LPDWORD pdwInOut, DWORD flags) override
     {
+        // The caller's buffer CAPACITY is what it passes in; DirectInput
+        // overwrites it with the number actually returned. Capture it first, or
+        // appending past the returned count writes off the end of the buffer.
+        const DWORD capacity = pdwInOut ? *pdwInOut : 0;
         const HRESULT hr = m_real->GetDeviceData(cbData, rgdod, pdwInOut, flags);
         if (FAILED(hr) || !pdwInOut) return hr;
         note(m_kind == Kind::Mouse ? inputbus::kMouseBuffered : inputbus::kKeyboardBuffered);
@@ -162,11 +166,11 @@ public:
         if (peek) return hr;
 
         DWORD used = *pdwInOut;
-        const DWORD cap = m_last_cap ? m_last_cap : used + 16;
-        (void)cap;
-        used += append_events(rgdod, used, cbData);
+        const DWORD room = (capacity > used) ? (capacity - used) : 0;
+        const DWORD added = append_events(rgdod, used, cbData, room);
+        used += added;
         *pdwInOut = used;
-        if (m_event && used) SetEvent(m_event);
+        if (m_event && added) SetEvent(m_event);
         return hr;
     }
 
@@ -224,15 +228,20 @@ private:
 
     // Append our events after the real ones, with a monotone sequence and a
     // timestamp not earlier than the last real event.
-    DWORD append_events(LPDIDEVICEOBJECTDATA out, DWORD used, DWORD stride)
+    DWORD append_events(LPDIDEVICEOBJECTDATA out, DWORD used, DWORD stride, DWORD room)
     {
         if (stride < sizeof(DIDEVICEOBJECTDATA)) return 0;
         std::uint32_t keys = 0, buttons = 0;
-        if (!inputbus::read_levels(keys, buttons)) return 0;
+        if (!inputbus::read_levels(keys, buttons)) { inputbus::note_injected(0, 0xFFFFFFFFu, false); return 0; }
 
         DWORD n = 0;
+        bool capped = false;
         const DWORD tick = GetTickCount();
         auto emit = [&](DWORD ofs, DWORD data) {
+            if (n >= room) { capped = true; return; }   // residue is kept: the
+            // emitted[] shadow is only updated on a successful emit, so an
+            // event that did not fit is re-offered on the next drain rather
+            // than being silently lost.
             auto* e = reinterpret_cast<LPDIDEVICEOBJECTDATA>(reinterpret_cast<char*>(out) + (used + n) * stride);
             e->dwOfs = ofs;
             e->dwData = data;
@@ -247,14 +256,19 @@ private:
                 const bool want = (keys & km.flag) != 0;
                 const bool have = (m_emitted_keys & km.flag) != 0;
                 if (want == have) continue;
+                const DWORD before = n;
                 emit(km.dik, want ? 0x80 : 0x00);
-                m_emitted_keys ^= km.flag;
+                if (n > before) m_emitted_keys ^= km.flag;
             }
         } else {
             int dx = 0, dy = 0;
-            inputbus::take_impulse(dx, dy);
-            if (dx) emit(DIMOFS_X, static_cast<DWORD>(dx));
-            if (dy) emit(DIMOFS_Y, static_cast<DWORD>(dy));
+            if (room >= 2) {
+                inputbus::take_impulse(dx, dy);   // only consume if it can be delivered
+                if (dx) emit(DIMOFS_X, static_cast<DWORD>(dx));
+                if (dy) emit(DIMOFS_Y, static_cast<DWORD>(dy));
+            } else if (room) {
+                capped = true;
+            }
             const struct { std::uint32_t flag; DWORD ofs; } btns[] = {
                 { inputbus::kLeft,  DIMOFS_BUTTON0 },
                 { inputbus::kRight, DIMOFS_BUTTON1 },
@@ -263,10 +277,12 @@ private:
                 const bool want = (buttons & b.flag) != 0;
                 const bool have = (m_emitted_buttons & b.flag) != 0;
                 if (want == have) continue;
+                const DWORD before = n;
                 emit(b.ofs, want ? 0x80 : 0x00);
-                m_emitted_buttons ^= b.flag;
+                if (n > before) m_emitted_buttons ^= b.flag;
             }
         }
+        inputbus::note_injected(n, keys, capped);
         return n;
     }
 

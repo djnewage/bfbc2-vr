@@ -106,6 +106,16 @@ void take_impulse(int& dx, int& dy)
     if (dy) b->consumed_dy.fetch_add(dy, std::memory_order_relaxed);
 }
 
+void note_injected(unsigned events, std::uint32_t levels, bool was_capped)
+{
+    Bus* b = get();
+    if (!b) return;
+    if (events) b->injected_events.fetch_add(events, std::memory_order_relaxed);
+    b->drain_calls.fetch_add(1, std::memory_order_relaxed);
+    b->levels_seen.store(levels, std::memory_order_relaxed);
+    if (was_capped) b->capped.fetch_add(1, std::memory_order_relaxed);
+}
+
 void note_hook_alive(std::uint32_t device_flags)
 {
     Bus* b = get();

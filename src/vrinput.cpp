@@ -51,7 +51,11 @@ float g_snap_degrees = 30.0f;
 // known number of counts, watch how far the game camera actually turned, and
 // low-pass the ratio. Until the first measurement lands, a conservative
 // bootstrap is used - a wrong guess then under-turns rather than spinning.
-float g_counts_per_rad = 1500.0f;
+// Measured in game 2026-08-28 through the DirectInput path: 334-406 counts
+// per radian across 100-500 count deltas (the spread is the game's own mouse
+// smoothing). Bootstrapping near the measured value means the very first turn
+// is roughly right, and the live estimator refines from there.
+float g_counts_per_rad = 360.0f;
 bool  g_gain_measured = false;
 unsigned g_gain_samples = 0;
 float g_turn_sign = 1.0f;          // +1 if positive dx turns the same way as +yaw
@@ -417,6 +421,11 @@ void status(FILE* f)
                 bus ? bus->devices.load() : 0u, bus ? bus->polls.load() : 0u,
                 bus ? bus->consumed_dx.load() : 0, bus ? bus->consumed_dy.load() : 0,
                 bus ? bus->injected_events.load() : 0u);
+        if (bus) {
+            fprintf(f, "  dinput: drains=%u injected=%u capped=%u levels-seen=0x%X published=0x%X\n",
+                    bus->drain_calls.load(), bus->injected_events.load(), bus->capped.load(),
+                    bus->levels_seen.load(), g_want_keys);
+        }
     }
     fprintf(f, "input: %s %s-handed foreground=%d legacy=%d snaps=%u frames=%u\n",
             g_enabled ? "on" : "off", g_swap_hands ? "left" : "right",

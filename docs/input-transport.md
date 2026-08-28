@@ -18,8 +18,15 @@ Reading `BFBC2Game.exe` settled it:
 | `GetCursorPos`, `GetKeyboardState`, `GetAsyncKeyState` **absent** | the game does not poll the OS directly |
 
 So the device state DirectInput hands the game is a better place to inject than the OS input
-queue: exact counts, no acceleration, no focus requirement, and structurally incapable of
-leaking keystrokes into another application.
+queue: exact counts, no acceleration, and structurally incapable of leaking keystrokes into
+another application.
+
+**Correction (measured, 2026-08-28).** An earlier version of this document claimed the change
+also made input *focus-independent*. It does not. The game acquires both devices at FOREGROUND
+cooperative level - mouse `0x6` (exclusive | foreground), keyboard `0x16` (foreground |
+nonexclusive | nowinkey) - so when the game loses focus DirectInput unacquires them and the game
+stops reading input at all, whatever the transport. The other benefits are real and measured;
+that one was an assumption and it was wrong.
 
 ## Shape
 
@@ -63,6 +70,20 @@ edge diff emits the key-ups by itself — a dead publisher cannot leave a key do
 old SendInput path with its foreground gate. A partial install is therefore still a working
 install — including the case where `dinput8.dll` already exists and is not ours, which the
 installer refuses to overwrite.
+
+## Measured behaviour (2026-08-28, in game)
+
+- The proxy loads, wraps the keyboard and the mouse, and the game reads through it continuously
+  (`hook=LIVE`, tens of thousands of drains). **DirectInput genuinely feeds gameplay here** - it
+  is not a text-entry-only device, which was the main risk in this design.
+- Both devices are **buffered** (keyboard buffer 32, mouse 512), so `GetDeviceData` is the live
+  path and `GetDeviceState` is secondary.
+- Injecting `DIK_W` walks the character: the recovered camera position moved 1.4 world units
+  over a 2 s hold, with exactly two events emitted (down and up).
+- Mouse counts arrive exactly - `consumed` tracks requested with no loss - and turn the body at
+  roughly **334-406 counts per radian**, mildly non-linear across 100-500 counts. That spread is
+  in-game smoothing, and it is why the aim loop measures its gain continuously instead of
+  trusting one calibration.
 
 ## Verifying it
 

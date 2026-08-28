@@ -66,6 +66,9 @@ struct Bus {
     std::atomic<std::int32_t>  consumed_dx;      // cumulative, for exactness checks
     std::atomic<std::int32_t>  consumed_dy;
     std::atomic<std::uint32_t> injected_events;  // buffered events appended
+    std::atomic<std::uint32_t> drain_calls;      // GetDeviceData calls seen
+    std::atomic<std::uint32_t> levels_seen;      // last key mask the input side read
+    std::atomic<std::uint32_t> capped;           // appends refused for want of room
 };
 
 // Create-or-open. Safe to call repeatedly; returns null only if the mapping
@@ -87,6 +90,7 @@ void add_impulse(int dx, int dy);
 // Input side.
 void note_hook_alive(std::uint32_t device_flags);
 void take_impulse(int& dx, int& dy);
+void note_injected(unsigned events, std::uint32_t levels, bool was_capped);
 bool read_levels(std::uint32_t& keys, std::uint32_t& buttons);
 
 } // namespace inputbus
