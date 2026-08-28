@@ -241,6 +241,10 @@ float& g_vm_push = g_vm_off[2];   // '-'/'=' and the 'push' command drive z
 // every launch meant a session where the gun simply sat still and looked
 // broken. 'grip off' still disables it.
 bool  g_grip_on = true;
+// Which controller holds the weapon. `input left|right` drives this now: it was
+// previously settable only by the separate `grip` command, so after `input left`
+// the aim loop dedup'd and gated on one controller while measuring the other,
+// and the weapon model followed a third choice.
 int   g_grip_hand = 1;            // 0 left, 1 right
 float g_grip_units_per_metre = 1.0f;   // Frostbite is metric
 float g_grip_smooth = 0.0f;       // 0 = raw; otherwise per-frame lerp factor
@@ -1028,13 +1032,31 @@ void compensate_body_turn(float body_delta_radians)
     adjust_view_reference(aimpolicy::compensation_ref_delta(body_delta_radians, g_yaw_sign), 0.0f);
 }
 
+unsigned g_cam_yaw_rejected = 0;
+unsigned camera_yaw_rejections() { return g_cam_yaw_rejected; }
+
 bool game_camera_angles(float& yaw, float& pitch)
 {
     if (!g_have_eye) return false;
     const float f[3] = { g_cam_rows[6], g_cam_rows[7], g_cam_rows[8] };
     static float s_last_yaw = 0.0f;
-    yaw = aimpolicy::yaw_from_forward(f, s_last_yaw);
-    s_last_yaw = yaw;
+    static bool  s_have_last = false;
+    const float y = aimpolicy::yaw_from_forward(f, s_last_yaw);
+
+    // g_cam_rows holds whichever camera wrote c189 LAST this frame, and shadow,
+    // reflection and scope passes all write it. A frame where one of those went
+    // last reports a heading that has nothing to do with the player, and the aim
+    // loop would turn the body to chase it. A player cannot rotate 90 degrees
+    // between two Presents, so a jump that large is someone else's camera.
+    constexpr float kMaxYawJump = 90.0f * kPi / 180.0f;
+    if (s_have_last && std::fabs(aimpolicy::body_delta(y, s_last_yaw)) > kMaxYawJump) {
+        ++g_cam_yaw_rejected;
+        return false;
+    }
+
+    yaw = y;
+    s_last_yaw = y;
+    s_have_last = true;
     pitch = aimpolicy::pitch_from_forward(f);
     return true;
 }
@@ -1386,6 +1408,16 @@ void recalibrate_aim()
 
 bool aim_calibrated() { return g_aim_ref_valid; }
 
+void set_grip_hand(int hand)
+{
+    if (hand < 0 || hand > 1 || hand == g_grip_hand) return;
+    g_grip_hand = hand;
+    // Both calibrations were captured against the other controller.
+    g_grip_calibrated = false;
+    g_aim_ref_valid = false;
+    VRLOG("[grip] weapon hand is now %s", hand ? "right" : "left");
+}
+
 // Last yaw authority, kept so the status block can distinguish "the loop is
 // idle" from "the loop is declining because you are pointing at the sky".
 float g_aim_authority = 0.0f;
@@ -1586,9 +1618,9 @@ void status(FILE* f)
     fprintf(f, "correct=%d hmd=%d eye=%d ipd=%.4f%s pos6dof=%d frame=%u modified/frame=%u\n",
             g_correct_on ? 1 : 0, g_hmd_active ? 1 : 0, g_frame_eye, g_ipd_world, g_ipd_manual ? "(manual)" : "",
             g_pos_enabled ? 1 : 0, g_frame_index, g_modified_last_frame);
-    fprintf(f, "head: full-orientation=%d ref-pose=%d turn=%.1f deg aim-view-offset=%.1f deg\n",
+    fprintf(f, "head: full-orientation=%d ref-pose=%d turn=%.1f deg aim-view-offset=%.1f deg cam-yaw-rejected=%u\n",
             g_full_orientation ? 1 : 0, g_have_ref_pose ? 1 : 0,
-            g_turn_yaw * 180.0f / kPi, g_aim_view_offset * 180.0f / kPi);
+            g_turn_yaw * 180.0f / kPi, g_aim_view_offset * 180.0f / kPi, g_cam_yaw_rejected);
     fprintf(f, "hmd yaw=%.1f pitch=%.1f deg  dpos=(%.3f %.3f %.3f)\n",
             yaw * 180.0f / kPi, pitch * 180.0f / kPi, g_hmd_dpos[0], g_hmd_dpos[1], g_hmd_dpos[2]);
     fprintf(f, "fov: auto=%d manual=%.2f widen=%.2f/%.2f  world tan=%.4f/%.4f near=%.3f far=%.1f (deg %.1f x %.1f)\n",

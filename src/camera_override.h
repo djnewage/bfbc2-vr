@@ -93,6 +93,13 @@ bool aim_calibrated();
 // near vertical, where yaw is meaningless. Diagnostic only.
 float aim_authority();
 
+// Frames where the camera heading was refused as implausible - a shadow,
+// reflection or scope pass wrote c189 last. Diagnostic only.
+unsigned camera_yaw_rejections();
+
+// Which hand holds the weapon, kept in step with `input left|right`.
+void set_grip_hand(int hand);
+
 // Remove a body rotation WE commanded from the presentation, so steering the
 // game's aim toward the gun does not swing the player's view. Deliberate turns
 // (snap) are NOT passed through here: they should move the view.

@@ -254,3 +254,61 @@ the "melee" binding really was sending **F** — meaning F is the grenade key in
 keeps its bindings inside `Documents/BFBC2/GameSettings.bin` as an opaque blob (`settings.ini` is
 video and audio only), so the mod cannot read them. Rather than swap one guess for another,
 `key <action> <char>` sets them and the choice persists in `bfbc2vr.cfg`.
+
+## Why the aim loop shook on its own
+
+The stick fixes above account for the discrete 30° jumps, but the *shake* had a separate cause: the
+loop's gain was around 1.
+
+`compensate_aim_turn` moves the view in the **same instruction stream**, and `rebuild_correction`
+consumes it three lines later — but the injected mouse counts reach the game on its next input
+tick and only appear in the camera **two or more frames later**, smeared by the game's own mouse
+smoothing (the measured 334-406 counts/radian spread is that smoothing). Nothing recorded what had
+already been asked for, so the loop re-emitted `kp * err` every frame against an error that had not
+responded yet. Total commanded rotation was `N * kp * err`, not `kp * err`. With `kp = 0.20` and
+2-4 frames of latency that is a loop gain at or above 1 — overshoot, then reverse, forever.
+
+The "one correction per fresh sample" gate did not throttle it: the pose sequence increments on
+exact float inequality, and tracking noise makes that true every frame.
+
+**Fix**: track the yaw commanded but not yet observed, and act on `err − in_flight`. It retires as
+the camera's own heading moves — which correctly counts the player's own mouse too, since the error
+is measured from the camera. The retire can only shrink the debt (a player turning against us would
+otherwise inflate it without bound), and it decays anyway so a menu or a dead player cannot wedge
+the loop shut. `in-flight=` is in the status block, and a new `waiting-on-in-flight` counter
+separates "the gun is on target" from "we already asked and are waiting".
+
+### Three more things that fed it
+
+- **The gain estimator accepted a measurement at HALF the requested rotation**, so
+  `ratio = counts / moved` could be **twice** the true gain. An over-estimated gain emits twice the
+  counts intended while compensating the view for only what was intended — the view swings while
+  the code believes it is holding still. It now waits for 90% of the rotation, and folds the first
+  sample in rather than replacing the 360 bootstrap wholesale.
+- **`g_turn_sign` was unverified until a snap turn happened.** If it is wrong the loop drives the
+  body *away* from the target: positive feedback, not a wobble, until the 60° cap trips and the
+  reference re-baselines — then again. The aim loop now waits for the sign to be a measured fact,
+  and says so in the status block.
+- **The error cap re-baselined on the first sample over it**, silently redefining "aligned"
+  mid-gesture. Between 50° and 81° of elevation `atan2` has `1/h` sensitivity and flips sign as the
+  muzzle crosses the vertical plane, so noise alone tripped it repeatedly. It now requires the cap
+  to persist, and refuses to re-baseline on a reading whose yaw authority is already low.
+
+### And one that could inject a spike from nowhere
+
+`g_cam_rows` holds whichever camera wrote c189 **last** in a frame — shadow, reflection and scope
+passes all write it. A frame where one of those went last reports a heading unrelated to the
+player, which the loop would turn the body to chase. A player cannot rotate 90° between two
+Presents, so a jump that large is now refused and counted as `cam-yaw-rejected`.
+
+Separately, the view offset now bleeds toward zero on **every** idle path. It previously bled only
+on the deadzone and not-firing paths, so it froze wherever it happened to be whenever the muzzle
+crossed 81°, the cap tripped, or the sample was stale.
+
+### A cross-wire found on the way
+
+`g_grip_hand` was hardcoded to the right hand and settable only by the separate `grip left|right`
+command, while `input left` flipped `g_swap_hands`. Since `update_aim`'s hand parameter never
+reaches the error computation — `controller_dir_now` always reads `g_grip_hand` — the swapped
+configuration dedup'd and gated on one controller while measuring the other. `input left|right`
+now moves the weapon hand with it, and invalidates both calibrations when it does.

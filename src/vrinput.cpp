@@ -104,18 +104,35 @@ float g_aim_max_error = 1.05f;       // rad (~60 deg): beyond this something is
                                      // out of sync - stop chasing, do not spin
 float g_aim_residue = 0.0f;          // sub-count carry, or small errors would
                                      // round to zero and never converge
+
+// Yaw we have commanded but the game camera has not shown us yet.
+//
+// The injected counts reach the game on its next input tick and only appear in
+// the camera two or more frames later, smeared by the game's own mouse
+// smoothing. Without tracking that, the loop re-emitted kp * err every frame
+// against an error that had not responded, so the total commanded rotation was
+// N * kp * err rather than kp * err - a loop gain around 1, which is exactly
+// the overshoot-then-reverse the player saw as shaking. We now subtract what is
+// still in flight from the error before acting on it, and retire it as the
+// camera's own yaw actually moves.
+float g_aim_inflight = 0.0f;
+float g_aim_last_cam_yaw = 0.0f;
+bool  g_aim_have_cam_yaw = false;
+unsigned g_aim_inflight_held = 0;    // times the correction was already in flight
+unsigned g_aim_cap_run = 0;          // consecutive samples over the error cap
+constexpr unsigned kAimCapRunToRebase = 30;
 // One counter per reason the loop can decline. "Nothing happened and I cannot
 // tell why" was costing a full relaunch per diagnosis, so every early return is
 // named and counted, and the non-zero ones are logged periodically.
 enum AimWhy {
     kAimDisabled = 0, kAimStaleSample, kAimTurnSettling, kAimNoHmd, kAimNoReference,
     kAimNoController, kAimPole, kAimErrorCap, kAimDeadzone, kAimZeroCounts,
-    kAimNotForeground, kAimGatedOff, kAimWhyCount
+    kAimNotForeground, kAimGatedOff, kAimSignUnknown, kAimWhyCount
 };
 const char* const kAimWhyName[kAimWhyCount] = {
     "disabled", "stale-sample", "turn-settling", "no-hmd", "no-reference",
     "no-controller", "pole", "error-cap", "deadzone", "zero-counts",
-    "not-foreground", "gated-off"
+    "not-foreground", "gated-off", "turn-sign-unknown"
 };
 unsigned g_aim_why[kAimWhyCount] = {};
 unsigned g_aim_emits = 0;
@@ -248,7 +265,12 @@ void settle_turn()
 
     ++g_pending.frames;
     const float moved = aimpolicy::body_delta(yaw, g_pending.yaw_before);
-    const bool enough = std::fabs(moved) > 0.5f * std::fabs(g_pending.want_radians);
+    // Wait for the motion to essentially finish. Accepting it at HALF the
+    // requested rotation made ratio = counts / moved up to twice the true gain,
+    // and an over-estimated gain emits twice the counts intended while
+    // compensating the view for only what was intended - so the view swung
+    // while the code believed it was holding still.
+    const bool enough = std::fabs(moved) > 0.9f * std::fabs(g_pending.want_radians);
     if (!enough && g_pending.frames < kTurnSettleFrames) return;
 
     g_pending.active = false;
@@ -274,7 +296,10 @@ void settle_turn()
     g_last_measured_ratio = ratio;
     // Median-free EMA: this is a slowly varying quantity and the outliers are
     // already rejected above.
-    g_counts_per_rad = g_gain_measured ? (g_counts_per_rad * 0.75f + ratio * 0.25f) : ratio;
+    // Fold the first sample in rather than replacing the bootstrap outright: a
+    // single bad measurement used to become the gain wholesale.
+    g_counts_per_rad = g_gain_measured ? (g_counts_per_rad * 0.75f + ratio * 0.25f)
+                                       : (g_counts_per_rad * 0.5f + ratio * 0.5f);
     ++g_gain_samples;
     ++g_turn_measured;
     if (!g_gain_measured) {
@@ -316,25 +341,75 @@ void update_aim(int hand)
     // correction end up chasing each other.
     if (g_pending.active) { ++g_aim_why[kAimTurnSettling]; return; }
 
+    // Until a snap turn has resolved which way a positive dx actually turns the
+    // body, the sign is a guess - and a wrong guess drives the body AWAY from
+    // the target, which is positive feedback, not a wobble. Wait for the fact.
+    if (!g_turn_sign_known) { ++g_aim_why[kAimSignUnknown]; return; }
+
+    // Retire in-flight yaw against what the camera has actually done since the
+    // last sample. Anything the player's own mouse contributes retires it too,
+    // which is correct: the error is measured from the camera, so any rotation
+    // that has landed is already reflected in it.
+    {
+        float cam_yaw = 0.0f, cam_pitch = 0.0f;
+        if (camover::game_camera_angles(cam_yaw, cam_pitch)) {
+            if (g_aim_have_cam_yaw) {
+                const float moved = aimpolicy::body_delta(cam_yaw, g_aim_last_cam_yaw);
+                if (std::isfinite(moved)) {
+                    // Retire only: this may shrink toward zero, never grow. If
+                    // the player mouse-turns against us, `moved` is negative and
+                    // a bare subtraction would inflate the debt without bound.
+                    const float was = g_aim_inflight;
+                    const float now = was - moved;
+                    if (was > 0.0f)      g_aim_inflight = (std::min)(was, (std::max)(0.0f, now));
+                    else if (was < 0.0f) g_aim_inflight = (std::max)(was, (std::min)(0.0f, now));
+                }
+            }
+            // Safety valve. If the camera never reflects what we asked for -
+            // a menu, a cutscene, a dead player - the debt must not wedge the
+            // loop shut forever. Decays to nothing in well under a second.
+            g_aim_inflight *= 0.95f;
+            if (std::fabs(g_aim_inflight) < 1e-4f) g_aim_inflight = 0.0f;
+            g_aim_last_cam_yaw = cam_yaw;
+            g_aim_have_cam_yaw = true;
+        }
+    }
+
     float err_yaw = 0.0f, err_pitch = 0.0f;
     int reason = 0;
     if (!camover::aim_error(err_yaw, err_pitch, reason)) {
         static const AimWhy map[5] = { kAimNoController, kAimNoHmd, kAimNoReference, kAimNoController, kAimPole };
         ++g_aim_why[map[(reason >= 0 && reason < 5) ? reason : 0]];
+        camover::bleed_turn_offset();   // idle for any reason: keep converging
         return;
     }
     g_aim_last_error = err_yaw;
 
+    // Act on what is left after the corrections already on their way.
+    err_yaw -= g_aim_inflight;
+
     if (std::fabs(err_yaw) > g_aim_max_error) {
-        // Something is out of sync. Refusing forever produced 13511 dead
-        // samples in one session; re-baseline so the next one is usable.
         ++g_aim_why[kAimErrorCap];
-        camover::recalibrate_aim();
+        // Something is out of sync. Refusing forever produced 13511 dead
+        // samples in one session - but re-baselining on the FIRST sample over
+        // the cap silently redefines "aligned" mid-gesture, and near vertical,
+        // where atan2 flips sign as the muzzle crosses the vertical plane,
+        // noise alone trips it. Require it to persist, and never re-baseline
+        // on a reading we already distrust.
+        if (++g_aim_cap_run >= kAimCapRunToRebase && camover::aim_authority() > 0.5f) {
+            g_aim_cap_run = 0;
+            camover::recalibrate_aim();
+        }
+        camover::bleed_turn_offset();
         return;
     }
+    g_aim_cap_run = 0;
     if (std::fabs(err_yaw) < g_aim_deadzone) {
         g_aim_residue = 0.0f;
-        ++g_aim_why[kAimDeadzone];
+        // Distinguish "the gun is on target" from "we already asked for this
+        // and are waiting" - they look identical from the counters otherwise.
+        if (std::fabs(g_aim_inflight) > g_aim_deadzone) ++g_aim_inflight_held;
+        else ++g_aim_why[kAimDeadzone];
         camover::bleed_turn_offset();   // idle: let view and body re-converge
         return;
     }
@@ -348,12 +423,16 @@ void update_aim(int hand)
     const float want = step * g_counts_per_rad * g_turn_sign + g_aim_residue;
     const int counts = static_cast<int>(want);
     g_aim_residue = want - static_cast<float>(counts);
-    if (counts == 0) { ++g_aim_why[kAimZeroCounts]; return; }
+    if (counts == 0) { ++g_aim_why[kAimZeroCounts]; camover::bleed_turn_offset(); return; }
+
+    const float emitted_yaw = (g_counts_per_rad > 1.0f)
+        ? static_cast<float>(counts) / (g_counts_per_rad * g_turn_sign) : 0.0f;
 
     if (use_dinput()) inputbus::add_impulse(counts, 0);
     else if (osinput::game_is_foreground()) osinput::send_mouse_move(counts, 0);
     else { ++g_aim_why[kAimNotForeground]; return; }
     ++g_aim_emits;
+    g_aim_inflight += emitted_yaw;
 
     // Hold the view still. Compensate what was ACTUALLY EMITTED - the rounded
     // count converted back through the gain - not the pre-rounding step, or
@@ -361,9 +440,7 @@ void update_aim(int hand)
     // COMMANDED rather than what we observe, so it is cleanly attributable to
     // us: a snap turn or the player's own mouse, which must move the view, are
     // left alone.
-    const float emitted = (g_counts_per_rad > 1.0f)
-        ? static_cast<float>(counts) / (g_counts_per_rad * g_turn_sign) : 0.0f;
-    camover::compensate_aim_turn(emitted);
+    camover::compensate_aim_turn(emitted_yaw);
 }
 
 } // namespace
@@ -546,8 +623,10 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         if (has1) {
             if (!_stricmp(a1, "on")) g_enabled = true;
             else if (!_stricmp(a1, "off")) { g_enabled = false; release_all(); }
-            else if (!_stricmp(a1, "left")) g_swap_hands = true;
-            else if (!_stricmp(a1, "right")) g_swap_hands = false;
+            // The weapon hand must move with it, or the aim loop measures one
+            // controller while gating on the other.
+            else if (!_stricmp(a1, "left"))  { g_swap_hands = true;  camover::set_grip_hand(0); }
+            else if (!_stricmp(a1, "right")) { g_swap_hands = false; camover::set_grip_hand(1); }
         }
         _snprintf_s(reply, n, _TRUNCATE,
                     "input %s (%s-handed) foreground=%d legacy-input=%d snaps=%u",
@@ -741,10 +820,11 @@ void status(FILE* f)
     }
     // `authority` separates "idle" from "declining because you are pointing near
     // vertical", which are indistinguishable from the counters alone.
-    fprintf(f, "  aim: %s (%s, calibrated=%d) kp=%.2f deadzone=%.2f deg yaw-error=%+.1f deg authority=%.2f emits=%u\n",
+    fprintf(f, "  aim: %s (%s, calibrated=%d) kp=%.2f deadzone=%.2f deg yaw-error=%+.1f deg authority=%.2f in-flight=%+.1f deg emits=%u\n",
             g_aim_on ? "ON" : "off", g_aim_only_firing ? "firing" : "continuous",
             camover::aim_calibrated() ? 1 : 0, g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
-            g_aim_last_error * 180.0f / aimpolicy::kPi, camover::aim_authority(), g_aim_emits);
+            g_aim_last_error * 180.0f / aimpolicy::kPi, camover::aim_authority(),
+            g_aim_inflight * 180.0f / aimpolicy::kPi, g_aim_emits);
     fprintf(f, "  aim why:");
     for (int i = 0; i < kAimWhyCount; ++i) if (g_aim_why[i]) fprintf(f, " %s=%u", kAimWhyName[i], g_aim_why[i]);
     fprintf(f, "\n");
@@ -755,7 +835,9 @@ void status(FILE* f)
                                 " %s=%c", a.name, static_cast<char>(a.vk));
         fprintf(f, "%s\n", g_status_keys);
     }
-    fprintf(f, "  melee clicks refused (stick not centred)=%u\n", g_melee_suppressed);
+    fprintf(f, "  melee clicks refused (stick not centred)=%u  waiting-on-in-flight=%u  turn-sign=%s\n",
+            g_melee_suppressed, g_aim_inflight_held,
+            g_turn_sign_known ? (g_turn_sign > 0 ? "+1" : "-1") : "UNKNOWN (aim held off)");
     fprintf(f, "  gate: disabled=%u not-foreground=%u no-controllers=%u | turn: busy=%u no-camera=%u no-response=%u measured=%u\n",
             g_gate_disabled, g_gate_not_foreground, g_gate_no_controllers,
             g_turn_busy, g_turn_no_camera, g_turn_no_response, g_turn_measured);
