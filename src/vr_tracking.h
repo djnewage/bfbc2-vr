@@ -57,17 +57,32 @@ bool controller_connected(int hand);
 // acting once per rendered frame.
 unsigned controller_sequence(int hand);
 
-// Buttons and analog axes, from OpenVR's legacy controller state. `buttons` is
-// the raw ulButtonPressed mask (see vr::EVRButtonId); stick is axis 0 and
-// trigger axis 1 on both Index and Touch-style controllers.
+// Buttons and analog axes, from OpenVR's legacy controller state.
+//
+// `stick` is NOT simply axis 0. That assumption - previously stated here as
+// fact - is wrong on Index: openvr.h defines
+// `k_EButton_SteamVR_Touchpad = k_EButton_Axis0` (32) but
+// `k_EButton_IndexController_JoyStick = k_EButton_Axis3` (35), so on Knuckles
+// axis 0 is the TRACKPAD. Reading it as the stick meant a thumb resting on the
+// trackpad registered as a deliberate click, which threw a grenade every time
+// the player nudged the stick sideways. The axis and click bit are now chosen
+// per device; `axis` and `buttons` carry the raw values so the choice is
+// checkable from the status file rather than assumed.
 struct ControllerInput {
     bool     valid = false;
-    unsigned long long buttons = 0;
+    unsigned long long buttons = 0;    // raw ulButtonPressed (see vr::EVRButtonId)
     float    stick[2] = { 0.0f, 0.0f };
     float    trigger = 0.0f;
     float    grip = 0.0f;
+    unsigned long long stick_click_mask = 0;  // which bit means "stick pressed" here
+    int      stick_axis = 0;                  // which rAxis the stick was taken from
+    float    axis[5][2] = {};                 // every raw axis, for diagnosis
 };
 bool controller_input(int hand, ControllerInput& out);
+
+// Human-readable controller model, e.g. "knuckles". Empty until a device is
+// seen. Reported in the status block so the layout choice is visible.
+const char* controller_type(int hand);
 
 // The HMD orientation as a row-major 3x3 in OpenVR's right-handed, Y-up,
 // -Z-forward convention, relative to the seated/standing origin.

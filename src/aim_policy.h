@@ -58,7 +58,22 @@ StickKeys stick_to_keys(float x, float y, StickKeys previous,
 
 // A stick flick as a discrete event: fires once past `fire`, re-arms only
 // below `rearm`. Returns -1, 0 or +1.
-struct SnapState { bool armed = true; };
-int snap_turn_step(float x, SnapState& state, float fire = 0.65f, float rearm = 0.35f);
+//
+// `y` and the cooldown exist because raising the controller to aim upward drags
+// the thumb across the stick, and the player was getting bursts of snap turns
+// they never asked for. A deliberate turn is a sideways flick, so a gesture with
+// more vertical than horizontal travel is ignored; and `now_seconds` enforces a
+// minimum gap so that even if every other gate is fooled, a burst is impossible.
+//
+// `armed` starts FALSE: the latch must see a genuine at-rest reading before it
+// will fire. Starting armed meant any code path that reset the state - or any
+// dropped tracking sample reading as zero - could fire a turn with the stick
+// still held over.
+struct SnapState {
+    bool  armed = false;
+    float last_fire_seconds = -1e9f;
+};
+int snap_turn_step(float x, float y, float now_seconds, SnapState& state,
+                   float fire = 0.80f, float rearm = 0.25f, float cooldown = 0.25f);
 
 } // namespace aimpolicy

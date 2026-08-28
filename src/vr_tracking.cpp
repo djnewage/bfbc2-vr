@@ -50,6 +50,30 @@ void store_controller(int hand, const vr::TrackedDevicePose_t& p)
     g_ctl_valid[hand] = true;
 }
 
+// Which axis carries the thumbstick and which bit is its click, per device.
+// Index/Knuckles put the joystick on axis 3 / button 35 and the TRACKPAD on
+// axis 0 / button 32; everything else uses axis 0 / button 32 for the stick.
+// Getting this wrong is what made a resting thumb read as a deliberate click.
+char g_ctl_type[2][64] = {};
+int  g_stick_axis[2] = { 0, 0 };
+unsigned long long g_stick_click[2] = { 1ull << 32, 1ull << 32 };
+
+void identify_controller(int hand, vr::TrackedDeviceIndex_t idx)
+{
+    char type[64] = {};
+    g_system->GetStringTrackedDeviceProperty(idx, vr::Prop_ControllerType_String,
+                                             type, sizeof(type), nullptr);
+    if (!type[0] || std::strcmp(type, g_ctl_type[hand]) == 0) return;   // unchanged
+
+    std::strncpy(g_ctl_type[hand], type, sizeof(g_ctl_type[hand]) - 1);
+    const bool index = std::strstr(type, "knuckles") != nullptr ||
+                       std::strstr(type, "index") != nullptr;
+    g_stick_axis[hand]  = index ? 3 : 0;
+    g_stick_click[hand] = index ? (1ull << 35) : (1ull << 32);
+    VRLOG("[input] %s controller is '%s' - stick on axis %d, click bit %d",
+          hand ? "right" : "left", type, g_stick_axis[hand], index ? 35 : 32);
+}
+
 void refresh_controllers(const vr::TrackedDevicePose_t* poses, unsigned count)
 {
     if (!g_system || !poses) return;
@@ -62,6 +86,7 @@ void refresh_controllers(const vr::TrackedDevicePose_t* poses, unsigned count)
             g_ctl_valid[hand] = false; g_ctl_seen[hand] = false;
             continue;
         }
+        identify_controller(hand, idx);
         store_controller(hand, poses[idx]);
     }
 }
@@ -190,9 +215,20 @@ unsigned controller_sequence(int hand)
     return (hand >= 0 && hand <= 1) ? g_ctl_seq[hand] : 0u;
 }
 
+const char* controller_type(int hand)
+{
+    return (hand >= 0 && hand <= 1) ? g_ctl_type[hand] : "";
+}
+
 bool controller_input(int hand, ControllerInput& out)
 {
-    out = ControllerInput{};
+    // Deliberately does NOT clear `out` up front. It used to, which meant a
+    // refused read wrote stick[0] = 0 over the caller's good sample - and a
+    // zero stick reads as "returned to centre", re-arming the snap-turn latch
+    // while the stick was still held. Tracking flickers exactly when the
+    // player raises the controller, so that produced a burst of snap turns.
+    // Only `valid` changes on failure; the caller keeps the last good values.
+    out.valid = false;
     if (!g_system || hand < 0 || hand > 1) return false;
     const vr::TrackedDeviceIndex_t idx = g_ctl_index[hand];
     if (idx == vr::k_unTrackedDeviceIndexInvalid) return false;
@@ -212,8 +248,13 @@ bool controller_input(int hand, ControllerInput& out)
     }
     out.valid = true;
     out.buttons = st.ulButtonPressed;
-    out.stick[0] = st.rAxis[0].x;
-    out.stick[1] = st.rAxis[0].y;
+    for (int a = 0; a < 5; ++a) { out.axis[a][0] = st.rAxis[a].x; out.axis[a][1] = st.rAxis[a].y; }
+
+    const int ax = g_stick_axis[hand];
+    out.stick[0] = st.rAxis[ax].x;
+    out.stick[1] = st.rAxis[ax].y;
+    out.stick_axis = ax;
+    out.stick_click_mask = g_stick_click[hand];
     out.trigger = st.rAxis[1].x;
     out.grip = st.rAxis[2].x;
     return true;

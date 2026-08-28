@@ -45,12 +45,25 @@ StickKeys stick_to_keys(float x, float y, StickKeys previous, float on_threshold
     return out;
 }
 
-int snap_turn_step(float x, SnapState& state, float fire, float rearm)
+int snap_turn_step(float x, float y, float now_seconds, SnapState& state,
+                   float fire, float rearm, float cooldown)
 {
-    if (!std::isfinite(x)) { state.armed = true; return 0; }
-    if (std::fabs(x) < rearm) state.armed = true;
+    // A garbage sample says nothing about where the stick is, so it must not
+    // re-arm the latch - that is how a tracking dropout used to manufacture a
+    // turn with the stick held hard over.
+    if (!std::isfinite(x) || !std::isfinite(y)) return 0;
+
+    if (std::fabs(x) < rearm && std::fabs(y) < rearm) state.armed = true;
     if (!state.armed || std::fabs(x) < fire) return 0;
+
+    // A turn is a sideways flick. A thumb sliding as the arm rises is not.
+    if (std::fabs(x) <= std::fabs(y)) return 0;
+
+    // Even a fooled gate cannot produce a burst.
+    if (std::isfinite(now_seconds) && now_seconds - state.last_fire_seconds < cooldown) return 0;
+
     state.armed = false;
+    state.last_fire_seconds = now_seconds;
     return (x > 0.0f) ? 1 : -1;
 }
 

@@ -33,9 +33,10 @@ scancodes and ignore VK-only injection.
 | Right trigger | fire |
 | Right grip or A | reload |
 | Right B | jump |
-| Right stick click | melee |
+| Right stick click (stick centred) | melee — key configurable, see below |
 
-Commands: `input on|off|left|right`, `snap <degrees>`, `deadzone <0..1>`. Every controller's
+Commands: `input on|off|left|right`, `snap <degrees>`, `deadzone <0..1>`,
+`key <action> <char>` (melee, reload, use, jump, crouch, sprint; bare `key` lists them). Every controller's
 buttons, sticks, triggers and the currently held keys appear in `bfbc2vr_status.txt`, so
 bindings can be verified from outside the headset.
 
@@ -198,3 +199,58 @@ And job 3 no longer accumulates anything. The body's rotation since the referenc
 the **game camera**, which is ground truth and already reflects snap turns, the aim loop's own
 turns, the player's mouse, and anything the game does to the heading. Accumulating meant every turn
 the loop did not personally emit went missing from the mapping.
+
+## The right stick was firing input nobody asked for (2026-08-28)
+
+Two reports: *"when I use the right thumbstick it throws a grenade"* — on pushing it **sideways**,
+without clicking — and *"when I aim up I snap turn left and right and the screen shakes"*, as
+**discrete ~30° jumps**, i.e. real snap turns firing repeatedly.
+
+### The stick was never on the axis we were reading
+
+`thirdparty/openvr/openvr.h` defines `k_EButton_SteamVR_Touchpad = k_EButton_Axis0` (32) but
+`k_EButton_IndexController_JoyStick = k_EButton_Axis3` (35). The code read `rAxis[0]` as the stick
+and tested bit 32 as its click; **`rAxis[3]` and bit 35 were never read anywhere**. On Index that
+means bit 32 is the **trackpad**, which a thumb resting on or sliding across asserts with no
+intent — so nudging the stick sideways sent the melee key every time.
+
+`vr_tracking.h` had stated the assumption as fact ("stick is axis 0 ... on both Index and
+Touch-style controllers"); the bundled header contradicts it. The axis and click bit are now chosen
+per device from `Prop_ControllerType_String`, and **every raw axis and the raw button mask are
+printed in the status file** so the choice is checkable rather than assumed. Wiggle one control at
+a time and read off which numbers move.
+
+### Two paths re-armed the snap latch with the stick untouched
+
+- `release_all()` set `g_snap.armed = true`, and it runs on **every frame the input gate fails**.
+  One flickering controller read therefore re-armed the latch while the stick was still held over,
+  and the next good frame fired another turn.
+- `controller_input()` cleared its output struct *before* the validity check, so a refused read
+  wrote `stick[0] = 0` — which reads as "returned to centre" and re-arms too.
+
+Raising the controller is exactly when tracking flickers, so a thumb resting past the fire
+threshold produced a burst of turns in whichever direction it sat. Both are fixed: `release_all`
+no longer re-arms, a failed read leaves the caller's values alone, and the latch now **starts
+disarmed** — it must see a genuine at-rest reading before it will fire at all.
+
+### The rest of the gates
+
+- A turn must be a **sideways** flick (`|x| > |y|`): a thumb sliding as the arm rises is not one.
+- Fire threshold `0.65 → 0.80`, re-arm `0.35 → 0.25` — a wider dead band cannot chatter.
+- A **250 ms cooldown**, so even a fooled gate cannot produce a burst.
+- A stick **click** only counts when the stick is near centre (`< 0.4`), and melee is now a **tap**
+  rather than a hold, so a stuck false press cannot repeat the action. Refused clicks are counted
+  in the status block — a large number there is direct evidence the click bit is not a click.
+
+Snap turn deliberately does **not** dedup on the controller pose sequence the way the aim loop
+does: axis and button state comes from a separate `GetControllerState` poll, so pose freshness says
+nothing about it, and gating on it would make a deliberate flick do nothing while the player held
+the controller still.
+
+### The keys are configurable now
+
+The mod's entire key set is `W A S D Space Ctrl Shift R E F`, and the scancode path is correct, so
+the "melee" binding really was sending **F** — meaning F is the grenade key in this install. BC2
+keeps its bindings inside `Documents/BFBC2/GameSettings.bin` as an opaque blob (`settings.ini` is
+video and audio only), so the mod cannot read them. Rather than swap one guess for another,
+`key <action> <char>` sets them and the choice persists in `bfbc2vr.cfg`.

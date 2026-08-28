@@ -22,7 +22,7 @@ const char* const kPersistable[] = {
     "mode", "ownproj", "bones", "pos", "ipd",
     "widen", "auto", "headroll", "yawsign", "pitchsign", "correct",
     "hud", "input", "path", "snap", "deadzone", "aim",
-    "fov", "vmfov", "zoom", "hide",
+    "fov", "vmfov", "zoom", "hide", "key",
 };
 
 struct Entry { std::string key; std::string line; };
@@ -63,7 +63,7 @@ bool sub_keyed(const char* cmd)
     return _stricmp(cmd, "hud") == 0 || _stricmp(cmd, "aim") == 0 ||
            _stricmp(cmd, "grip") == 0 || _stricmp(cmd, "input") == 0 ||
            _stricmp(cmd, "path") == 0 || _stricmp(cmd, "fov") == 0 ||
-           _stricmp(cmd, "vmfov") == 0;
+           _stricmp(cmd, "vmfov") == 0 || _stricmp(cmd, "key") == 0;
 }
 
 // For a sub-keyed verb, a first argument that is itself a value (a number, or

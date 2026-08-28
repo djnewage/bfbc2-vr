@@ -124,6 +124,12 @@ unsigned g_gate_disabled = 0, g_gate_not_foreground = 0, g_gate_no_controllers =
 // Silent paths in the turn machinery. `no-response` means the injection never
 // reached the game - the single most diagnostic failure in this subsystem.
 unsigned g_turn_no_camera = 0, g_turn_busy = 0, g_turn_no_response = 0, g_turn_measured = 0;
+// Clicks refused because the stick was deflected. A large count here is direct
+// evidence that the "click" bit is not a click on this device.
+unsigned g_melee_suppressed = 0;
+char g_status_keys[256] = {};
+bool g_melee_prev = false;
+unsigned long long g_melee_until = 0;
 float g_aim_last_error = 0.0f;
 unsigned g_aim_last_seq = 0;         // one correction per FRESH controller sample
 bool g_aim_only_firing = false;      // 'aim mode firing': converge only while
@@ -151,7 +157,37 @@ vrtrack::ControllerInput g_in[2];
 // use k_EButton_A(7). Accept either so both work without a per-device table.
 constexpr unsigned long long kMaskA = (1ull << 2) | (1ull << 7);
 constexpr unsigned long long kMaskB = (1ull << 1);
+// Historic default. The real bit now comes per-device from vr_tracking, because
+// on Index this one is the TRACKPAD, not the joystick click.
 constexpr unsigned long long kMaskStickClick = (1ull << 32);   // k_EButton_Axis0
+
+// Which key each action sends. Configurable because the mod cannot read BC2's
+// own bindings: they live inside GameSettings.bin as an opaque blob, and
+// guessing produced a "melee" binding that actually threw grenades.
+struct ActionKey { const char* name; std::uint32_t flag; WORD vk; };
+ActionKey g_keys[] = {
+    { "melee",  inputbus::kF,     'F' },
+    { "reload", inputbus::kR,     'R' },
+    { "use",    inputbus::kE,     'E' },
+    { "jump",   inputbus::kSpace, VK_SPACE },
+    { "crouch", inputbus::kCtrl,  VK_LCONTROL },
+    { "sprint", inputbus::kShift, VK_LSHIFT },
+};
+ActionKey* find_action(const char* name)
+{
+    for (ActionKey& a : g_keys) if (_stricmp(a.name, name) == 0) return &a;
+    return nullptr;
+}
+WORD action_vk(const char* name)
+{
+    const ActionKey* a = find_action(name);
+    return a ? a->vk : 0;
+}
+std::uint32_t action_flag(const char* name)
+{
+    const ActionKey* a = find_action(name);
+    return a ? a->flag : 0u;
+}
 
 bool pressed(int hand, unsigned long long mask)
 {
@@ -342,15 +378,19 @@ void release_all()
     hold_key(g_held.keys.back,    false, 'S');
     hold_key(g_held.keys.left,    false, 'A');
     hold_key(g_held.keys.right,   false, 'D');
-    hold_key(g_held.sprint, false, VK_LSHIFT);
-    hold_key(g_held.crouch, false, VK_LCONTROL);
-    hold_key(g_held.use,    false, 'E');
-    hold_key(g_held.reload, false, 'R');
-    hold_key(g_held.jump,   false, VK_SPACE);
-    hold_key(g_held.melee,  false, 'F');
+    hold_key(g_held.sprint, false, action_vk("sprint"));
+    hold_key(g_held.crouch, false, action_vk("crouch"));
+    hold_key(g_held.use,    false, action_vk("use"));
+    hold_key(g_held.reload, false, action_vk("reload"));
+    hold_key(g_held.jump,   false, action_vk("jump"));
+    hold_key(g_held.melee,  false, action_vk("melee"));
     hold_mouse(g_held.fire, false, false);
     hold_mouse(g_held.ads,  false, true);
-    g_snap.armed = true;
+    // Deliberately does NOT re-arm the snap latch. release_all() runs on every
+    // frame the gate fails, so re-arming here meant one flickering controller
+    // read produced another snap turn with the stick still held over - the
+    // burst the player got whenever they raised the controller to aim up.
+    // Re-arming now requires a real at-rest reading (see snap_turn_step).
 }
 
 void on_present()
@@ -410,26 +450,43 @@ void on_present()
     // What we want held this frame.
     const StickKeys want = aimpolicy::stick_to_keys(g_in[mh].stick[0], g_in[mh].stick[1],
                                                     g_held.keys, g_stick_on, g_stick_off);
-    const bool w_sprint = pressed(mh, kMaskStickClick);
+    const float msx = g_in[mh].stick[0], msy = g_in[mh].stick[1];
+    const unsigned long long mclick = g_in[mh].stick_click_mask ? g_in[mh].stick_click_mask
+                                                                : kMaskStickClick;
+    const bool w_sprint = pressed(mh, mclick) && std::sqrt(msx * msx + msy * msy) < 0.4f;
     const bool w_fire   = g_in[wh].trigger >= g_trigger_threshold;
     const bool w_ads    = g_in[mh].trigger >= g_trigger_threshold;
     const bool w_reload = g_in[wh].grip > 0.6f || pressed(wh, kMaskA);
     const bool w_jump   = pressed(wh, kMaskB);
     const bool w_crouch = pressed(mh, kMaskA);
     const bool w_use    = pressed(mh, kMaskB);
-    const bool w_melee  = pressed(wh, kMaskStickClick);
+    // The click bit is only trusted when the stick is near centre. On Index the
+    // legacy "Axis0 pressed" bit is the TRACKPAD, which a resting or sliding
+    // thumb asserts - so pushing the stick sideways threw a grenade. A real
+    // melee click is made with the stick centred, so this costs nothing.
+    const float wsx = g_in[wh].stick[0], wsy = g_in[wh].stick[1];
+    const bool w_stick_centred = std::sqrt(wsx * wsx + wsy * wsy) < 0.4f;
+    const unsigned long long wclick = g_in[wh].stick_click_mask ? g_in[wh].stick_click_mask
+                                                                : kMaskStickClick;
+    const bool w_melee_raw = pressed(wh, wclick);
+    const bool w_melee     = w_melee_raw && w_stick_centred;
+    if (w_melee_raw && !w_stick_centred) ++g_melee_suppressed;
 
     g_want_keys = 0;
     if (want.forward) g_want_keys |= inputbus::kW;
     if (want.back)    g_want_keys |= inputbus::kS;
     if (want.left)    g_want_keys |= inputbus::kA;
     if (want.right)   g_want_keys |= inputbus::kD;
-    if (w_sprint)     g_want_keys |= inputbus::kShift;
-    if (w_reload)     g_want_keys |= inputbus::kR;
-    if (w_jump)       g_want_keys |= inputbus::kSpace;
-    if (w_crouch)     g_want_keys |= inputbus::kCtrl;
-    if (w_use)        g_want_keys |= inputbus::kE;
-    if (w_melee)      g_want_keys |= inputbus::kF;
+    if (w_sprint)     g_want_keys |= action_flag("sprint");
+    if (w_reload)     g_want_keys |= action_flag("reload");
+    if (w_jump)       g_want_keys |= action_flag("jump");
+    if (w_crouch)     g_want_keys |= action_flag("crouch");
+    if (w_use)        g_want_keys |= action_flag("use");
+    // A tap, not a hold: a stuck false press must not repeat the action. One
+    // rising edge produces a short pulse and nothing more.
+    if (w_melee && !g_melee_prev) g_melee_until = GetTickCount64() + 60;
+    g_melee_prev = w_melee;
+    if (GetTickCount64() < g_melee_until) g_want_keys |= action_flag("melee");
     g_want_buttons = (w_fire ? inputbus::kLeft : 0u) | (w_ads ? inputbus::kRight : 0u);
     if (g_test_key && GetTickCount() < g_test_until) g_want_keys |= g_test_key;
     else g_test_key = 0;
@@ -442,14 +499,14 @@ void on_present()
         hold_key(g_held.keys.back,    want.back,    'S');
         hold_key(g_held.keys.left,    want.left,    'A');
         hold_key(g_held.keys.right,   want.right,   'D');
-        hold_key(g_held.sprint, w_sprint, VK_LSHIFT);
+        hold_key(g_held.sprint, w_sprint, action_vk("sprint"));
         hold_mouse(g_held.fire, w_fire, false);
         hold_mouse(g_held.ads,  w_ads,  true);
-        hold_key(g_held.reload, w_reload, 'R');
-        hold_key(g_held.jump,   w_jump,   VK_SPACE);
-        hold_key(g_held.crouch, w_crouch, VK_LCONTROL);
-        hold_key(g_held.use,    w_use,    'E');
-        hold_key(g_held.melee,  w_melee,  'F');
+        hold_key(g_held.reload, w_reload, action_vk("reload"));
+        hold_key(g_held.jump,   w_jump, action_vk("jump"));
+        hold_key(g_held.crouch, w_crouch, action_vk("crouch"));
+        hold_key(g_held.use,    w_use, action_vk("use"));
+        hold_key(g_held.melee, GetTickCount64() < g_melee_until, action_vk("melee"));
     } else {
         g_held.keys = want;   // keep the hysteresis state coherent across a switch
     }
@@ -458,7 +515,20 @@ void on_present()
     // the aim turns with it. The view follows for free, because the view is
     // built on the game camera.
     settle_turn();
-    const int step = aimpolicy::snap_turn_step(g_in[wh].stick[0], g_snap);
+    // Only act on a real sample: an invalid read carries no stick position at
+    // all, and treating its zeroes as "returned to centre" is what let a
+    // tracking flicker manufacture turns.
+    //
+    // Note this deliberately does NOT dedup on the controller POSE sequence the
+    // way update_aim does. Button and axis state comes from a separate
+    // GetControllerState poll, not from the pose stream, so pose freshness says
+    // nothing about it - and gating on it would make a deliberate flick do
+    // nothing while the player held the controller still. Repeats are prevented
+    // where they should be: the latch and the cooldown inside snap_turn_step.
+    const float now_s = static_cast<float>(GetTickCount64()) * 0.001f;
+    const int step = g_in[wh].valid
+        ? aimpolicy::snap_turn_step(g_in[wh].stick[0], g_in[wh].stick[1], now_s, g_snap)
+        : 0;
     if (step != 0) {
         // Count only turns that were actually emitted: the counter used to rise
         // even when turn_body bailed, which made it lie about what happened.
@@ -483,6 +553,31 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
                     "input %s (%s-handed) foreground=%d legacy-input=%d snaps=%u",
                     g_enabled ? "on" : "off", g_swap_hands ? "left" : "right",
                     g_foreground ? 1 : 0, g_legacy_input_ok ? 1 : 0, g_snaps);
+        return true;
+    }
+    if (!strcmp(cmd, "key")) {
+        // The mod cannot read BC2's own bindings, so let the player state them.
+        char b1[24] = {}, b2[24] = {};
+        if (args) sscanf_s(args, "%23s %23s", b1, static_cast<unsigned>(sizeof(b1)),
+                                              b2, static_cast<unsigned>(sizeof(b2)));
+        if (!b1[0]) {
+            int used = _snprintf_s(reply, n, _TRUNCATE, "keys:");
+            for (const ActionKey& a : g_keys)
+                used += _snprintf_s(reply + used, n - used, _TRUNCATE, " %s=%c", a.name,
+                                    a.vk == VK_SPACE ? '_' : (a.vk == VK_LCONTROL ? '^' :
+                                    (a.vk == VK_LSHIFT ? '+' : static_cast<char>(a.vk))));
+            return true;
+        }
+        ActionKey* a = find_action(b1);
+        if (!a) { _snprintf_s(reply, n, _TRUNCATE, "no such action: %s", b1); return true; }
+        if (b2[0]) {
+            // Letters and digits only. The bus carries a fixed set of keys, so
+            // the action must still map to one the DIK table knows.
+            const char c = static_cast<char>(toupper(static_cast<unsigned char>(b2[0])));
+            if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) a->vk = static_cast<WORD>(c);
+            else { _snprintf_s(reply, n, _TRUNCATE, "key must be a letter or digit"); return true; }
+        }
+        _snprintf_s(reply, n, _TRUNCATE, "%s = %c", a->name, static_cast<char>(a->vk));
         return true;
     }
     if (!strcmp(cmd, "snap")) {
@@ -621,6 +716,16 @@ void status(FILE* f)
             g_enabled ? "on" : "off", g_swap_hands ? "left" : "right",
             g_foreground ? 1 : 0, g_legacy_input_ok ? 1 : 0, g_snaps, g_frames_injected);
     for (int h = 0; h < 2; ++h) {
+        // Every raw axis and the raw mask, because which axis is the stick and
+        // which bit is its click differs by device, and guessing that is what
+        // made a resting thumb throw grenades. Wiggle one control at a time and
+        // read off which numbers move.
+        fprintf(f, "  %s raw [%s]: axis0=(%+.2f %+.2f) axis1=(%+.2f %+.2f) axis2=(%+.2f %+.2f) axis3=(%+.2f %+.2f) axis4=(%+.2f %+.2f) using axis %d, click mask %016llX\n",
+                h ? "right" : "left ", vrtrack::controller_type(h),
+                g_in[h].axis[0][0], g_in[h].axis[0][1], g_in[h].axis[1][0], g_in[h].axis[1][1],
+                g_in[h].axis[2][0], g_in[h].axis[2][1], g_in[h].axis[3][0], g_in[h].axis[3][1],
+                g_in[h].axis[4][0], g_in[h].axis[4][1], g_in[h].stick_axis,
+                static_cast<unsigned long long>(g_in[h].stick_click_mask));
         fprintf(f, "  %s hand: valid=%d buttons=%08llX stick=(%+.2f %+.2f) trigger=%.2f grip=%.2f\n",
                 h ? "right" : "left", g_in[h].valid ? 1 : 0,
                 static_cast<unsigned long long>(g_in[h].buttons),
@@ -643,6 +748,14 @@ void status(FILE* f)
     fprintf(f, "  aim why:");
     for (int i = 0; i < kAimWhyCount; ++i) if (g_aim_why[i]) fprintf(f, " %s=%u", kAimWhyName[i], g_aim_why[i]);
     fprintf(f, "\n");
+    {
+        int used = _snprintf_s(g_status_keys, sizeof(g_status_keys), _TRUNCATE, "  keys:");
+        for (const ActionKey& a : g_keys)
+            used += _snprintf_s(g_status_keys + used, sizeof(g_status_keys) - used, _TRUNCATE,
+                                " %s=%c", a.name, static_cast<char>(a.vk));
+        fprintf(f, "%s\n", g_status_keys);
+    }
+    fprintf(f, "  melee clicks refused (stick not centred)=%u\n", g_melee_suppressed);
     fprintf(f, "  gate: disabled=%u not-foreground=%u no-controllers=%u | turn: busy=%u no-camera=%u no-response=%u measured=%u\n",
             g_gate_disabled, g_gate_not_foreground, g_gate_no_controllers,
             g_turn_busy, g_turn_no_camera, g_turn_no_response, g_turn_measured);
