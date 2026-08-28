@@ -438,6 +438,39 @@ int fingerprint_offset(void* shader, unsigned start, const float* data, unsigned
     return found;
 }
 
+// The REFERENCE head pose, captured at recenter: YAW ONLY.
+//
+// The reference answers "which way is the body facing", and nothing else. An
+// earlier version stored the whole head orientation, which meant any pitch or
+// roll present at the moment of capture became a permanent offset - capture
+// while the headset is tilted on a desk, or at an angle on the player's head,
+// and the world is tilted forever after, even when looking straight ahead.
+// That is exactly what happened in the headset.
+//
+// Keeping only yaw makes the reference gravity-aligned, so the head's pitch and
+// roll are always measured against level. BFVR does the same for the same
+// reason: its anchor stores a yaw-only base so pitch and roll are never zeroed.
+bool head_reference_now(float out[12])
+{
+    if (!vrtrack::have_pose()) return false;
+    float yaw = 0.0f, pitch = 0.0f;
+    hmd_yaw_pitch(yaw, pitch);
+    float pos[3];
+    vrtrack::position(pos);
+
+    // A pure yaw about world up, in OpenVR's column-vector convention, with
+    // yaw measured the way hmd_yaw_pitch reports it (0 = facing -Z).
+    const float c = std::cos(yaw), sn = std::sin(yaw);
+    const float R[3][3] = { {  c, 0.0f, sn },
+                            { 0.0f, 1.0f, 0.0f },
+                            { -sn, 0.0f,  c } };
+    for (int r = 0; r < 3; ++r) {
+        for (int col = 0; col < 3; ++col) out[r * 4 + col] = R[r][col];
+        out[r * 4 + 3] = pos[r];
+    }
+    return true;
+}
+
 // The live head pose as an OpenVR 3x4, the form draw_policy converts.
 bool head_pose_now(float out[12])
 {
@@ -1031,7 +1064,7 @@ void recenter()
         vrtrack::position(pos);
         g_ref_yaw = yaw; g_ref_pitch = pitch;
         std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
-        g_have_ref_pose = head_pose_now(g_ref_head_pose);
+        g_have_ref_pose = head_reference_now(g_ref_head_pose);
         g_turn_yaw = 0.0f;
         VRLOG("[vr] reference recentered (full orientation%s + position)",
               g_have_ref_pose ? "" : " UNAVAILABLE - falling back to yaw/pitch");
@@ -1094,7 +1127,7 @@ void on_present()
             g_hmd_active = true;
             g_ref_yaw = yaw; g_ref_pitch = pitch;
             std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
-            g_have_ref_pose = head_pose_now(g_ref_head_pose);
+            g_have_ref_pose = head_reference_now(g_ref_head_pose);
             g_turn_yaw = 0.0f;
             VRLOG("[vr] head tracking engaged (ref yaw=%.1f pitch=%.1f deg, pos %.2f/%.2f/%.2f)",
                   yaw * 180.0f / kPi, pitch * 180.0f / kPi, pos[0], pos[1], pos[2]);

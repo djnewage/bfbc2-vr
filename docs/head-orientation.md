@@ -59,3 +59,22 @@ The tests were written first and run against a stub reproducing the **actual old
 to prove they bite: six assertions failed, including the 11° measurement above. Then the real
 implementation turned them green. `headroll off` restores the old yaw+pitch path for A/B in the
 headset, and the reference falls back to it automatically if a head pose is unavailable.
+
+## Follow-up: the reference must be YAW ONLY (2026-08-28)
+
+Switching to the full head orientation introduced a new symptom: **the world was tilted even when
+looking straight ahead** — a constant tilt rather than the dynamic one the change had fixed.
+
+Cause: the reference pose was captured as the *entire* head orientation. The reference's job is
+only to answer "which way is the body facing"; storing pitch and roll with it means whatever tilt
+the headset happened to have at the moment of capture — sitting on a desk, or at an angle on the
+player's head — becomes a permanent offset applied to every frame thereafter.
+
+The reference is now built from yaw alone (`head_reference_now`), which makes it gravity-aligned,
+so the head's pitch and roll are always measured against level. BFVR does exactly this and for
+exactly this reason: its tracking anchor stores a yaw-only base reference so that pitch and roll
+are never zeroed.
+
+Note the asymmetry, which is the whole point: the *reference* is yaw-only, the *live* head pose is
+full. Strip roll from both and head tilt stops working; strip it from neither and a crooked
+capture tilts the world forever.
