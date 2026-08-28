@@ -341,6 +341,30 @@ bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
     return true;
 }
 
+bool aim_deviation(const float dir_now[3], const float dir_ref[3],
+                   float& yaw_error, float& pitch_error)
+{
+    yaw_error = 0.0f; pitch_error = 0.0f;
+    for (int i = 0; i < 3; ++i) if (!std::isfinite(dir_now[i]) || !std::isfinite(dir_ref[i])) return false;
+
+    const float hn = std::sqrt(dir_now[0]*dir_now[0] + dir_now[2]*dir_now[2]);
+    const float hr = std::sqrt(dir_ref[0]*dir_ref[0] + dir_ref[2]*dir_ref[2]);
+    // Near the pole a direction has no meaningful yaw; refuse rather than
+    // inventing one (BFVR's rule).
+    if (hn < 1e-3f || hr < 1e-3f) return false;
+
+    const float yaw_now = std::atan2(dir_now[0], dir_now[2]);
+    const float yaw_ref = std::atan2(dir_ref[0], dir_ref[2]);
+    constexpr float kPiF = 3.14159265358979f;
+    float d = yaw_now - yaw_ref;
+    while (d <= -kPiF) d += 2.0f * kPiF;
+    while (d >   kPiF) d -= 2.0f * kPiF;
+    yaw_error = d;
+
+    pitch_error = std::atan2(dir_now[1], hn) - std::atan2(dir_ref[1], hr);
+    return true;
+}
+
 bool controller_dir_in_body(const float ctrl_pose[12], const float head_ref[12],
                             float turn_yaw, float out[3])
 {

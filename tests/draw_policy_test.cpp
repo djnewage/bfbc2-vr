@@ -464,8 +464,64 @@ static void test_eye_axis_and_lean()
     CHECK_NEAR(lean[0], 0.2f, 1e-3f);
 }
 
+// The aim error is measured against a CAPTURED reference direction, so the
+// grip-versus-aim axis question stops mattering. These pin the properties that
+// make that safe.
+static void test_aim_deviation()
+{
+    auto dir = [](float yaw, float pitch, float out[3]) {
+        out[0] = std::sin(yaw) * std::cos(pitch);
+        out[1] = std::sin(pitch);
+        out[2] = std::cos(yaw) * std::cos(pitch);
+    };
+    float a[3], b[3], y = 0.0f, p = 0.0f;
+
+    // Same direction as the reference: no error, whatever that direction is.
+    dir(0.7f, -0.3f, a);
+    CHECK(aim_deviation(a, a, y, p));
+    CHECK_NEAR(y, 0.0f, 1e-5f);
+    CHECK_NEAR(p, 0.0f, 1e-5f);
+
+    // A known yaw deviation is reported as exactly that yaw - and the absolute
+    // direction of the reference does not matter, which is the whole point of
+    // measuring against a capture rather than an assumed axis.
+    dir(0.7f, -0.3f, a);
+    dir(0.7f + 0.25f, -0.3f, b);
+    CHECK(aim_deviation(b, a, y, p));
+    CHECK_NEAR(y, 0.25f, 1e-4f);
+    CHECK_NEAR(p, 0.0f, 1e-4f);
+
+    // Pitch likewise.
+    dir(0.7f, -0.3f + 0.2f, b);
+    CHECK(aim_deviation(b, a, y, p));
+    CHECK_NEAR(p, 0.2f, 1e-4f);
+    CHECK_NEAR(y, 0.0f, 1e-4f);
+
+    // Wrap-around: deviating across +/-180 is a small error, not a full turn.
+    dir(3.10f, 0.0f, a);
+    dir(-3.10f, 0.0f, b);
+    CHECK(aim_deviation(b, a, y, p));
+    CHECK(std::fabs(y) < 0.15f);
+
+    // A PURE ROLL of the controller about its own pointing axis must produce no
+    // deviation - otherwise a wrist twist would steer the player's body. The
+    // pointing direction is unchanged by such a roll, so this reduces to the
+    // identical-direction case, and it is asserted explicitly because it is the
+    // property that would be silently lost if the direction were ever derived
+    // from a different row of the pose.
+    dir(0.4f, 0.1f, a);
+    CHECK(aim_deviation(a, a, y, p));
+    CHECK_NEAR(y, 0.0f, 1e-5f);
+
+    // Degenerate inputs are refused rather than guessed at.
+    const float pole[3] = { 0.0f, 1.0f, 0.0f };
+    CHECK(!aim_deviation(pole, a, y, p));
+    CHECK(!aim_deviation(a, pole, y, p));
+}
+
 int main()
 {
+    test_aim_deviation();
     test_head_orientation();
     test_eye_axis_and_lean();
     test_grip_delta();

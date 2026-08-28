@@ -109,3 +109,33 @@ emit and blocked counts.
 **Yaw only, for now.** Steering the body vertically would pitch the player's view unless the
 presentation offset carries a pitch term too. That is the next increment and is deliberately not
 bundled with this one — one behavioural change per test build.
+
+### Fixing it: calibrate the pointing axis (2026-08-28)
+
+The first version was erratic in the headset, and the counters said why: `error-cap=13511`,
+a standing yaw error of **-102 deg**, and the view/body offset drifting to **-40 deg**. The loop
+spent most of its time refusing to chase, then lunging.
+
+**The error was wrong, not the controller.** `controller_dir_in_body()` took the controller pose's
+forward axis and called it the barrel - but OpenVR's legacy pose is the **grip** pose, whose
+forward runs along the handle, not the muzzle. That is exactly the distinction OpenXR draws
+between `aim` and `grip`, and why BFVR uses grip for holding the weapon and aim for pointing. Held
+naturally, the grip axis sits tens of degrees off where the player believes they are pointing.
+
+Rather than hardcode a grip-to-aim rotation (device-specific, and legacy input gives us no aim
+pose), the loop now **captures a reference direction** and measures deviation from it. Whatever
+axis the runtime's pose uses, the reference is captured in the same axis, so only *changes* matter
+and no device constant is needed - the same shape as the grip calibration that already works.
+A unit test asserts that a pure roll of the controller produces no yaw error, because a wrist
+twist must never steer the player's body.
+
+Also changed:
+
+- **The offset is bounded and bleeds back.** The view may lead the body by at most 25 deg, and
+  drifts back toward alignment whenever the loop is idle. Unbounded, it became a permanent lie
+  about where the body faces.
+- **The error cap re-baselines** instead of refusing forever, which is what produced 13511 dead
+  samples.
+- Softer defaults: `kp` 0.35 -> 0.20, deadzone 0.6 -> 1.5 deg so hand tremor does not drag the body.
+- `aim mode firing` converges only while the trigger is pulled, if continuous still feels twitchy.
+  `aim recal` re-captures the reference; `recenter` does too.

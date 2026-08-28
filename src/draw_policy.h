@@ -225,6 +225,24 @@ bool head_right_in_world(const float head_now[12], const float head_ref[12],
 bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
                    float turn_yaw, const float cam_rows[9], float out[3]);
 
+// The deviation of a controller's pointing direction from a CAPTURED
+// REFERENCE direction, as yaw and pitch.
+//
+// This exists because the raw pose is the wrong axis to trust. OpenVR's legacy
+// pose is the GRIP pose - its forward runs along the handle, not the muzzle -
+// which is precisely why OpenXR separates `aim` from `grip`, and why BFVR uses
+// grip for holding the weapon and aim for pointing. Treating the grip axis as
+// the barrel put the computed aim tens of degrees off where the player believed
+// they were pointing, and the loop chased it: a standing ~100 degree error.
+//
+// Capturing a reference direction and measuring deviation from it dissolves the
+// problem without any device-specific constant, because the reference is
+// captured in the SAME axis - only changes matter. A pure roll of the
+// controller about its own pointing axis must produce no deviation at all, or a
+// wrist twist would steer the player's body.
+bool aim_deviation(const float dir_now[3], const float dir_ref[3],
+                   float& yaw_error, float& pitch_error);
+
 // Where a controller points, expressed in the GAME CAMERA's frame.
 //
 // This is what makes the aim error simple. The game's own aim is, by

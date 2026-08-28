@@ -66,6 +66,20 @@ bool  g_have_ref_pose = false;
 // to be folded into g_ref_yaw; with a full-orientation reference it has to be
 // its own term, or a turn would be indistinguishable from a head movement.
 float g_turn_yaw = 0.0f;
+
+// The controller direction that means "aligned with the game's aim", captured
+// rather than assumed. Without it the raw grip axis was treated as the barrel -
+// OpenVR's legacy pose is the GRIP pose, whose forward runs along the handle,
+// not the muzzle - which left the loop chasing a standing ~100 degree error it
+// could never close.
+float g_aim_ref_dir[3] = { 0.0f, 0.0f, 1.0f };
+bool  g_aim_ref_valid = false;
+
+// The view may lead the body by at most this much, and drifts back toward
+// alignment when the loop is idle. Unbounded it reached -40 degrees, at which
+// point "straight ahead" no longer meant "where my body faces".
+constexpr float kMaxTurnOffset = 25.0f * kPi / 180.0f;
+constexpr float kTurnBleedPerFrame = 0.02f * kPi / 180.0f;
 bool  g_full_orientation = true;   // 'headroll off' falls back to yaw+pitch
 float g_hmd_dpos[3]  = {};      // delta in OpenVR axes (+X right, +Y up, -Z fwd)
 
@@ -1066,6 +1080,7 @@ void recenter()
         std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
         g_have_ref_pose = head_reference_now(g_ref_head_pose);
         g_turn_yaw = 0.0f;
+        g_aim_ref_valid = false;          // the aim reference is relative to this
         VRLOG("[vr] reference recentered (full orientation%s + position)",
               g_have_ref_pose ? "" : " UNAVAILABLE - falling back to yaw/pitch");
     } else {
@@ -1312,23 +1327,47 @@ bool headset_tangents(float& tan_half_h, float& tan_half_v)
     return true;
 }
 
+// The controller's pointing direction in the body frame, in whatever axis the
+// runtime's pose happens to use - which is exactly why it is only ever compared
+// against a reference captured in the same axis.
+bool controller_dir_now(float out[3])
+{
+    if (!g_have_ref_pose) return false;
+    float pose[12];
+    if (!vrtrack::controller_pose(g_grip_hand, pose)) return false;
+    return drawpolicy::controller_dir_in_body(pose, g_ref_head_pose, g_turn_yaw, out);
+}
+
+void recalibrate_aim()
+{
+    float dir[3];
+    g_aim_ref_valid = controller_dir_now(dir);
+    if (g_aim_ref_valid) {
+        std::memcpy(g_aim_ref_dir, dir, sizeof(g_aim_ref_dir));
+        VRLOG("[aim] reference captured - the gun now reads as aligned with the game's aim");
+    }
+}
+
+bool aim_calibrated() { return g_aim_ref_valid; }
+
 bool aim_error(float& yaw_error, float& pitch_error, int& reason)
 {
     yaw_error = 0.0f; pitch_error = 0.0f; reason = 0;
     if (!g_hmd_active) { reason = 1; return false; }
     if (!g_have_ref_pose) { reason = 2; return false; }
-    float pose[12];
-    if (!vrtrack::controller_pose(g_grip_hand, pose)) { reason = 3; return false; }
 
     float dir[3];
-    if (!drawpolicy::controller_dir_in_body(pose, g_ref_head_pose, g_turn_yaw, dir)) { reason = 3; return false; }
+    if (!controller_dir_now(dir)) { reason = 3; return false; }
 
-    // The game's aim is (0,0,1) in camera coordinates, so the error is just
-    // where the barrel points in that frame.
-    const float h = std::sqrt(dir[0]*dir[0] + dir[2]*dir[2]);
-    if (h < 1e-3f) { reason = 4; return false; }   // straight up or down
-    yaw_error = std::atan2(dir[0], dir[2]);
-    pitch_error = std::atan2(dir[1], h);
+    if (!g_aim_ref_valid) {
+        // The first usable sample DEFINES "aligned", instead of assuming the
+        // pose's own forward axis is the barrel.
+        std::memcpy(g_aim_ref_dir, dir, sizeof(g_aim_ref_dir));
+        g_aim_ref_valid = true;
+        VRLOG("[aim] reference captured on first sample");
+        return false;                      // no correction on the baseline frame
+    }
+    if (!drawpolicy::aim_deviation(dir, g_aim_ref_dir, yaw_error, pitch_error)) { reason = 4; return false; }
     return true;
 }
 
@@ -1338,7 +1377,19 @@ void compensate_aim_turn(float body_yaw_delta)
     // view_yaw = body_yaw + head_yaw + turn_offset, so absorbing the body's
     // rotation into the offset holds the presented view still. A deliberate
     // turn deliberately does NOT come through here.
+    // Bounded: this is a standing divergence between what the player sees and
+    // where their body faces, and unbounded it became a permanent one.
     g_turn_yaw = aimpolicy::wrap_pi(g_turn_yaw - body_yaw_delta);
+    g_turn_yaw = (std::min)((std::max)(g_turn_yaw, -kMaxTurnOffset), kMaxTurnOffset);
+}
+
+void bleed_turn_offset()
+{
+    // Called while the aim loop is idle: let the view and body converge again,
+    // slowly enough to be imperceptible.
+    if (g_turn_yaw > kTurnBleedPerFrame)       g_turn_yaw -= kTurnBleedPerFrame;
+    else if (g_turn_yaw < -kTurnBleedPerFrame) g_turn_yaw += kTurnBleedPerFrame;
+    else                                       g_turn_yaw = 0.0f;
 }
 
 bool weapon_tangents(float& tan_half_h, float& tan_half_v)

@@ -83,10 +83,20 @@ bool head_frame(float& yaw, float& pitch, float pos[3]);
 // a bare false is what made "the aim loop did nothing" undiagnosable.
 bool aim_error(float& yaw_error, float& pitch_error, int& reason);
 
+// Capture "the gun is pointing where the game is aiming" from the controller's
+// current direction. The error is measured against this, which is what makes
+// the grip-versus-aim axis question irrelevant - see draw_policy.h.
+void recalibrate_aim();
+bool aim_calibrated();
+
 // Remove a body rotation WE commanded from the presentation, so steering the
 // game's aim toward the gun does not swing the player's view. Deliberate turns
 // (snap) are NOT passed through here: they should move the view.
 void compensate_aim_turn(float body_yaw_delta);
+
+// Let the view and body converge again while the aim loop is idle, so the
+// offset never becomes a permanent lie about where the body faces.
+void bleed_turn_offset();
 
 // Rotate the PRESENTED view by `radians` (positive = left, matching the yaw
 // convention in aim_policy.h). Used by snap turn. This is the only sanctioned

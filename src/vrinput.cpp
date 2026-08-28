@@ -93,8 +93,10 @@ float g_last_measured_ratio = 0.0f;
 // as well, or steering the body vertically would tilt the player's view; that
 // is the next increment, deliberately not bundled with this one.
 bool  g_aim_on = false;
-float g_aim_kp = 0.35f;              // proportional, no integral
-float g_aim_deadzone = 0.010f;       // rad (~0.6 deg) - inside this, leave it alone
+float g_aim_kp = 0.20f;              // proportional, no integral. Softer than
+                                     // the first attempt, which lunged.
+float g_aim_deadzone = 0.026f;       // rad (~1.5 deg): hand tremor must not
+                                     // drive the player's body
 float g_aim_max_step = 0.12f;        // rad per emit; the response measured
                                      // non-linear above ~500 counts, so small
                                      // steps stay in the trustworthy region
@@ -124,6 +126,9 @@ unsigned g_gate_disabled = 0, g_gate_not_foreground = 0, g_gate_no_controllers =
 unsigned g_turn_no_camera = 0, g_turn_busy = 0, g_turn_no_response = 0, g_turn_measured = 0;
 float g_aim_last_error = 0.0f;
 unsigned g_aim_last_seq = 0;         // one correction per FRESH controller sample
+bool g_aim_only_firing = false;      // 'aim mode firing': converge only while
+                                     // the trigger is pulled, so idle hand
+                                     // movement never drags the body
 float g_stick_on = 0.35f, g_stick_off = 0.25f;
 float g_trigger_threshold = 0.6f;
 
@@ -258,6 +263,11 @@ void publish()
 void update_aim(int hand)
 {
     if (!g_aim_on) { ++g_aim_why[kAimDisabled]; return; }
+    if (g_aim_only_firing && g_in[hand].trigger < g_trigger_threshold) {
+        ++g_aim_why[kAimDisabled];
+        camover::bleed_turn_offset();
+        return;
+    }
 
     // One correction per fresh controller sample. Present runs faster than the
     // runtime produces poses, and without this every correction is emitted
@@ -279,8 +289,19 @@ void update_aim(int hand)
     }
     g_aim_last_error = err_yaw;
 
-    if (std::fabs(err_yaw) > g_aim_max_error) { ++g_aim_why[kAimErrorCap]; return; }
-    if (std::fabs(err_yaw) < g_aim_deadzone) { g_aim_residue = 0.0f; ++g_aim_why[kAimDeadzone]; return; }
+    if (std::fabs(err_yaw) > g_aim_max_error) {
+        // Something is out of sync. Refusing forever produced 13511 dead
+        // samples in one session; re-baseline so the next one is usable.
+        ++g_aim_why[kAimErrorCap];
+        camover::recalibrate_aim();
+        return;
+    }
+    if (std::fabs(err_yaw) < g_aim_deadzone) {
+        g_aim_residue = 0.0f;
+        ++g_aim_why[kAimDeadzone];
+        camover::bleed_turn_offset();   // idle: let view and body re-converge
+        return;
+    }
 
     float step = err_yaw * g_aim_kp;
     step = (std::min)((std::max)(step, -g_aim_max_step), g_aim_max_step);
@@ -476,6 +497,11 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
             else if (!_stricmp(a1, "kp")) {
                 char b2[16] = {}; if (args) sscanf_s(args, "%*s %15s", b2, static_cast<unsigned>(sizeof(b2)));
                 if (b2[0]) g_aim_kp = (std::min)((std::max)(static_cast<float>(atof(b2)), 0.02f), 1.0f);
+            } else if (!_stricmp(a1, "recal")) {
+                camover::recalibrate_aim();
+            } else if (!_stricmp(a1, "mode")) {
+                char b2[16] = {}; if (args) sscanf_s(args, "%*s %15s", b2, static_cast<unsigned>(sizeof(b2)));
+                if (b2[0]) g_aim_only_firing = (_stricmp(b2, "firing") == 0);
             } else if (!_stricmp(a1, "deadzone")) {
                 char b2[16] = {}; if (args) sscanf_s(args, "%*s %15s", b2, static_cast<unsigned>(sizeof(b2)));
                 if (b2[0]) g_aim_deadzone = (std::min)((std::max)(static_cast<float>(atof(b2)), 0.0f), 0.2f);
@@ -485,8 +511,9 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         int top = -1; unsigned topn = 0;
         for (int i = 0; i < kAimWhyCount; ++i) if (g_aim_why[i] > topn) { topn = g_aim_why[i]; top = i; }
         _snprintf_s(reply, n, _TRUNCATE,
-                    "aim %s kp=%.2f deadzone=%.1f deg error=%.1f deg emits=%u gain=%.0f top-block=%s(%u)",
-                    g_aim_on ? "on" : "off", g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
+                    "aim %s (%s, calibrated=%d) kp=%.2f deadzone=%.1f deg error=%.1f deg emits=%u gain=%.0f top-block=%s(%u)",
+                    g_aim_on ? "on" : "off", g_aim_only_firing ? "firing" : "continuous",
+                    camover::aim_calibrated() ? 1 : 0, g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
                     g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits, g_counts_per_rad,
                     top >= 0 ? kAimWhyName[top] : "none", topn);
         return true;
