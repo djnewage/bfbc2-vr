@@ -139,3 +139,30 @@ Also changed:
 - Softer defaults: `kp` 0.35 -> 0.20, deadzone 0.6 -> 1.5 deg so hand tremor does not drag the body.
 - `aim mode firing` converges only while the trigger is pulled, if continuous still feels twitchy.
   `aim recal` re-captures the reference; `recenter` does too.
+
+### The pole: aiming vertically spun the body
+
+With the reference capture in, pointing the gun up or down made the body spin uncontrollably.
+
+Yaw is not equally meaningful in every direction. Turning the body by a yaw error `d` displaces a
+pointing direction horizontally by roughly `h * d`, where `h` is the direction's horizontal
+component. Near vertical `h` collapses, `atan2(x, z)` becomes hypersensitive - at 80 deg of pitch a
+centimetre of hand wobble swings the reading by tens of degrees - and the loop faithfully turned
+the body that far.
+
+The guard that was supposed to catch this refused only below `h < 1e-3`, which is **within 0.06
+degrees of straight up**. Every realistic steep aim sailed past it and was chased at full gain.
+
+`aim_deviation` now also returns an **authority**: 1 when pointing level, ramping linearly to 0
+between ~50 and ~81 degrees of pitch, and refusing beyond. The yaw error is scaled by it. That
+scaling is not a fudge factor - it *is* the horizontal projection above - and the ramp means the
+body keeps following a steepening aim progressively more gently rather than cutting out mid-gesture.
+The reference direction is checked the same way, since a reference captured while pointing at the
+sky has no usable yaw either.
+
+Tests pin the property that matters: the same yaw deviation commands a strictly smaller turn at 65
+deg of pitch than level, authority falls off monotonically with no cliff, and a steep aim is
+refused outright.
+
+`authority=` now appears in the status block, because "the loop is idle" and "the loop is declining
+because you are pointing at the sky" were indistinguishable from the counters alone.

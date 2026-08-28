@@ -341,17 +341,29 @@ bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
     return true;
 }
 
+// Horizontal component below which yaw carries no usable information at all
+// (~81 degrees of pitch), and the component above which it is fully trusted
+// (~50 degrees). Between them the authority ramps linearly, so there is no cliff
+// where the body stops following part-way through a gesture.
+constexpr float kYawRefuse = 0.15f;
+constexpr float kYawFull   = 0.64f;
+
 bool aim_deviation(const float dir_now[3], const float dir_ref[3],
-                   float& yaw_error, float& pitch_error)
+                   float& yaw_error, float& pitch_error, float& authority)
 {
-    yaw_error = 0.0f; pitch_error = 0.0f;
+    yaw_error = 0.0f; pitch_error = 0.0f; authority = 0.0f;
     for (int i = 0; i < 3; ++i) if (!std::isfinite(dir_now[i]) || !std::isfinite(dir_ref[i])) return false;
 
     const float hn = std::sqrt(dir_now[0]*dir_now[0] + dir_now[2]*dir_now[2]);
     const float hr = std::sqrt(dir_ref[0]*dir_ref[0] + dir_ref[2]*dir_ref[2]);
     // Near the pole a direction has no meaningful yaw; refuse rather than
-    // inventing one (BFVR's rule).
-    if (hn < 1e-3f || hr < 1e-3f) return false;
+    // inventing one (BFVR's rule). The reference counts too - a reference
+    // captured while pointing at the sky has no usable yaw either.
+    const float h = (hn < hr) ? hn : hr;
+    if (h < kYawRefuse) return false;
+
+    authority = (h - kYawRefuse) / (kYawFull - kYawRefuse);
+    if (authority > 1.0f) authority = 1.0f;
 
     const float yaw_now = std::atan2(dir_now[0], dir_now[2]);
     const float yaw_ref = std::atan2(dir_ref[0], dir_ref[2]);

@@ -240,8 +240,19 @@ bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
 // captured in the SAME axis - only changes matter. A pure roll of the
 // controller about its own pointing axis must produce no deviation at all, or a
 // wrist twist would steer the player's body.
+//
+// `authority` reports how much the yaw reading can be trusted, and it exists
+// because yaw is not equally meaningful in every direction. Turning the body by
+// a yaw error `d` displaces a pointing direction horizontally by roughly
+// `h * d`, where `h` is the direction's horizontal component - so near vertical
+// a large yaw difference corresponds to almost no real deviation, and `atan2`
+// becomes hypersensitive: at 80 degrees of pitch a centimetre of hand wobble
+// swings yaw by tens of degrees. Feeding that straight to the turn loop spun the
+// player's body whenever they aimed up or down. Scaling by `authority` is not a
+// fudge factor - it is that horizontal projection - and it tapers to zero before
+// the pole rather than cutting off at a cliff.
 bool aim_deviation(const float dir_now[3], const float dir_ref[3],
-                   float& yaw_error, float& pitch_error);
+                   float& yaw_error, float& pitch_error, float& authority);
 
 // Where a controller points, expressed in the GAME CAMERA's frame.
 //

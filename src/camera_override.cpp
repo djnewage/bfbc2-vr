@@ -1350,6 +1350,11 @@ void recalibrate_aim()
 
 bool aim_calibrated() { return g_aim_ref_valid; }
 
+// Last yaw authority, kept so the status block can distinguish "the loop is
+// idle" from "the loop is declining because you are pointing at the sky".
+float g_aim_authority = 0.0f;
+float aim_authority() { return g_aim_authority; }
+
 bool aim_error(float& yaw_error, float& pitch_error, int& reason)
 {
     yaw_error = 0.0f; pitch_error = 0.0f; reason = 0;
@@ -1367,7 +1372,17 @@ bool aim_error(float& yaw_error, float& pitch_error, int& reason)
         VRLOG("[aim] reference captured on first sample");
         return false;                      // no correction on the baseline frame
     }
-    if (!drawpolicy::aim_deviation(dir, g_aim_ref_dir, yaw_error, pitch_error)) { reason = 4; return false; }
+    float authority = 0.0f;
+    if (!drawpolicy::aim_deviation(dir, g_aim_ref_dir, yaw_error, pitch_error, authority)) {
+        g_aim_authority = 0.0f;
+        reason = 4;
+        return false;
+    }
+    g_aim_authority = authority;
+    // Scale to the horizontal displacement the turn would actually produce.
+    // Unscaled, aiming vertically spun the body: up there the yaw reading is
+    // large and jittery while the gun has barely moved horizontally at all.
+    yaw_error *= authority;
     return true;
 }
 

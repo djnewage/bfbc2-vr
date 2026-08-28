@@ -634,9 +634,12 @@ void status(FILE* f)
                 g_turn_sign, g_pending.active ? 1 : 0,
                 yaw * 180.0f / aimpolicy::kPi, pitch * 180.0f / aimpolicy::kPi, had ? "" : " (none)");
     }
-    fprintf(f, "  aim: %s kp=%.2f deadzone=%.2f deg yaw-error=%+.1f deg emits=%u\n",
-            g_aim_on ? "ON" : "off", g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
-            g_aim_last_error * 180.0f / aimpolicy::kPi, g_aim_emits);
+    // `authority` separates "idle" from "declining because you are pointing near
+    // vertical", which are indistinguishable from the counters alone.
+    fprintf(f, "  aim: %s (%s, calibrated=%d) kp=%.2f deadzone=%.2f deg yaw-error=%+.1f deg authority=%.2f emits=%u\n",
+            g_aim_on ? "ON" : "off", g_aim_only_firing ? "firing" : "continuous",
+            camover::aim_calibrated() ? 1 : 0, g_aim_kp, g_aim_deadzone * 180.0f / aimpolicy::kPi,
+            g_aim_last_error * 180.0f / aimpolicy::kPi, camover::aim_authority(), g_aim_emits);
     fprintf(f, "  aim why:");
     for (int i = 0; i < kAimWhyCount; ++i) if (g_aim_why[i]) fprintf(f, " %s=%u", kAimWhyName[i], g_aim_why[i]);
     fprintf(f, "\n");

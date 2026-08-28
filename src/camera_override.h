@@ -89,6 +89,10 @@ bool aim_error(float& yaw_error, float& pitch_error, int& reason);
 void recalibrate_aim();
 bool aim_calibrated();
 
+// How much of the yaw reading is trusted right now: 1 pointing level, 0 pointing
+// near vertical, where yaw is meaningless. Diagnostic only.
+float aim_authority();
+
 // Remove a body rotation WE commanded from the presentation, so steering the
 // game's aim toward the gun does not swing the player's view. Deliberate turns
 // (snap) are NOT passed through here: they should move the view.

@@ -474,11 +474,11 @@ static void test_aim_deviation()
         out[1] = std::sin(pitch);
         out[2] = std::cos(yaw) * std::cos(pitch);
     };
-    float a[3], b[3], y = 0.0f, p = 0.0f;
+    float a[3], b[3], y = 0.0f, p = 0.0f, w = 0.0f;
 
     // Same direction as the reference: no error, whatever that direction is.
     dir(0.7f, -0.3f, a);
-    CHECK(aim_deviation(a, a, y, p));
+    CHECK(aim_deviation(a, a, y, p, w));
     CHECK_NEAR(y, 0.0f, 1e-5f);
     CHECK_NEAR(p, 0.0f, 1e-5f);
 
@@ -487,20 +487,20 @@ static void test_aim_deviation()
     // measuring against a capture rather than an assumed axis.
     dir(0.7f, -0.3f, a);
     dir(0.7f + 0.25f, -0.3f, b);
-    CHECK(aim_deviation(b, a, y, p));
+    CHECK(aim_deviation(b, a, y, p, w));
     CHECK_NEAR(y, 0.25f, 1e-4f);
     CHECK_NEAR(p, 0.0f, 1e-4f);
 
     // Pitch likewise.
     dir(0.7f, -0.3f + 0.2f, b);
-    CHECK(aim_deviation(b, a, y, p));
+    CHECK(aim_deviation(b, a, y, p, w));
     CHECK_NEAR(p, 0.2f, 1e-4f);
     CHECK_NEAR(y, 0.0f, 1e-4f);
 
     // Wrap-around: deviating across +/-180 is a small error, not a full turn.
     dir(3.10f, 0.0f, a);
     dir(-3.10f, 0.0f, b);
-    CHECK(aim_deviation(b, a, y, p));
+    CHECK(aim_deviation(b, a, y, p, w));
     CHECK(std::fabs(y) < 0.15f);
 
     // A PURE ROLL of the controller about its own pointing axis must produce no
@@ -510,18 +510,73 @@ static void test_aim_deviation()
     // property that would be silently lost if the direction were ever derived
     // from a different row of the pose.
     dir(0.4f, 0.1f, a);
-    CHECK(aim_deviation(a, a, y, p));
+    CHECK(aim_deviation(a, a, y, p, w));
     CHECK_NEAR(y, 0.0f, 1e-5f);
 
     // Degenerate inputs are refused rather than guessed at.
     const float pole[3] = { 0.0f, 1.0f, 0.0f };
-    CHECK(!aim_deviation(pole, a, y, p));
-    CHECK(!aim_deviation(a, pole, y, p));
+    CHECK(!aim_deviation(pole, a, y, p, w));
+    CHECK(!aim_deviation(a, pole, y, p, w));
+}
+
+// Aiming vertically spun the player's body. The yaw reading is enormous and
+// jittery near the pole while the gun has barely moved horizontally, and the old
+// guard only refused within 0.06 degrees of straight up, so essentially every
+// steep aim was chased at full gain. These pin the taper that fixes it.
+static void test_aim_deviation_near_pole()
+{
+    auto dir = [](float yaw, float pitch, float out[3]) {
+        out[0] = std::sin(yaw) * std::cos(pitch);
+        out[1] = std::sin(pitch);
+        out[2] = std::cos(yaw) * std::cos(pitch);
+    };
+    const float deg = 3.14159265358979f / 180.0f;
+    float a[3], b[3], y = 0.0f, p = 0.0f, w = 0.0f;
+
+    // Level: full authority, and the error is passed through untouched.
+    dir(0.0f, 0.0f, a);
+    dir(0.30f, 0.0f, b);
+    CHECK(aim_deviation(b, a, y, p, w));
+    CHECK_NEAR(w, 1.0f, 1e-4f);
+    CHECK_NEAR(y, 0.30f, 1e-4f);
+
+    // Steeply up: refused outright. This is the case that used to sail through
+    // the 1e-3 guard and drive a full-gain turn.
+    dir(0.0f, 85.0f * deg, a);
+    dir(40.0f * deg, 85.0f * deg, b);
+    CHECK(!aim_deviation(b, a, y, p, w));
+
+    // A reference captured while pointing at the sky is just as unusable.
+    dir(0.0f, 0.0f, b);
+    CHECK(!aim_deviation(b, a, y, p, w));
+
+    // Authority falls off monotonically as the aim steepens, with no cliff: the
+    // body keeps following, progressively more gently, until it stops.
+    float prev = 2.0f;
+    for (float pitch_deg = 0.0f; pitch_deg <= 80.0f; pitch_deg += 10.0f) {
+        dir(0.0f, pitch_deg * deg, a);
+        dir(0.20f, pitch_deg * deg, b);
+        const bool ok = aim_deviation(b, a, y, p, w);
+        if (!ok) { CHECK(pitch_deg >= 70.0f); break; }   // only the steep end refuses
+        CHECK(w <= prev + 1e-5f);
+        CHECK(w >= 0.0f);
+        prev = w;
+    }
+
+    // The property that actually stops the spin: the SAME yaw deviation commands
+    // a strictly smaller turn when the gun is pointed steeply than when level.
+    dir(0.0f, 0.0f, a);      dir(0.20f, 0.0f, b);
+    CHECK(aim_deviation(b, a, y, p, w));
+    const float level = std::fabs(y) * w;
+    dir(0.0f, 65.0f * deg, a); dir(0.20f, 65.0f * deg, b);
+    CHECK(aim_deviation(b, a, y, p, w));
+    CHECK(std::fabs(y) * w < level);
 }
 
 int main()
 {
     test_aim_deviation();
+    test_aim_deviation_near_pole();
     test_head_orientation();
     test_eye_axis_and_lean();
     test_grip_delta();
