@@ -9,9 +9,12 @@
 
 #include "logger.h"
 #include "vrinput.h"
+#include "dinput8_proxy.h"
+#include "input_bus.h"
 #include "wrappers.h"
 
 #include <windows.h>
+#include <cstring>
 
 namespace {
 
@@ -70,17 +73,43 @@ FARPROC forward(const char* name)
 
 // ---------------------------------------------------------------------------
 
+// ONE BINARY, TWO FILENAMES.
+//
+// The same DLL is installed as `d3d9.dll` (renderer: VR, tracking, the
+// correction) and as `dinput8.dll` (input: the DirectInput wrappers). Windows
+// loads those as two independent modules with two copies of every global, so
+// each has to know which role it is playing - and it can only find out by
+// looking at its own filename.
+//
+// The distinction matters for load order: if the game imports dinput8
+// statically, our input copy is loaded and initialised BEFORE d3d9 and long
+// before anything VR exists. So the input role does the bare minimum and
+// touches nothing that assumes a renderer.
+bool g_input_role = false;
+
+bool detect_input_role(HMODULE self)
+{
+    char path[MAX_PATH] = {};
+    if (!GetModuleFileNameA(self, path, MAX_PATH)) return false;
+    const char* base = strrchr(path, '\\');
+    base = base ? base + 1 : path;
+    return _stricmp(base, "dinput8.dll") == 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(module);
-        vrlog::init();
-        VRLOG("[init] bfbc2vr proxy attached to process %lu", GetCurrentProcessId());
+        g_input_role = detect_input_role(module);
+        vrlog::init(g_input_role ? "bfbc2vr_input.log" : nullptr);
+        VRLOG("[init] bfbc2vr %s role attached to process %lu",
+              g_input_role ? "INPUT (dinput8)" : "renderer (d3d9)", GetCurrentProcessId());
+        if (g_input_role) dinput8proxy::init();
         break;
     case DLL_PROCESS_DETACH:
         VRLOG("[init] detaching");
-        vrinput::release_all();   // never leave a key held down behind us
+        if (!g_input_role) vrinput::release_all();   // never leave a key held down behind us
         vrlog::shutdown();
         break;
     default:
@@ -90,6 +119,41 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 }
 
 extern "C" {
+
+// --- dinput8 surface (live only when installed under that name) ------------
+HRESULT WINAPI DirectInput8Create(HINSTANCE inst, DWORD version, REFIID riid, LPVOID* out, LPUNKNOWN outer)
+{
+    return dinput8proxy::create(inst, version, riid, out, outer);
+}
+
+HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* out)
+{
+    return dinput8proxy::get_class_object(rclsid, riid, out);
+}
+
+HRESULT WINAPI DllCanUnloadNow()
+{
+    // Never let the loader unload us out from under the game's device wrappers.
+    return S_FALSE;
+}
+
+HRESULT WINAPI DllRegisterServer()
+{
+    auto fn = reinterpret_cast<HRESULT (WINAPI*)()>(dinput8proxy::forward("DllRegisterServer"));
+    return fn ? fn() : E_FAIL;
+}
+
+HRESULT WINAPI DllUnregisterServer()
+{
+    auto fn = reinterpret_cast<HRESULT (WINAPI*)()>(dinput8proxy::forward("DllUnregisterServer"));
+    return fn ? fn() : E_FAIL;
+}
+
+LPCVOID WINAPI GetdfDIJoystick()
+{
+    auto fn = reinterpret_cast<LPCVOID (WINAPI*)()>(dinput8proxy::forward("GetdfDIJoystick"));
+    return fn ? fn() : nullptr;
+}
 
 // Self-identification. Tooling needs to answer "is the d3d9.dll sitting in the
 // game directory ours, DXVK's, or something else?" before overwriting it.

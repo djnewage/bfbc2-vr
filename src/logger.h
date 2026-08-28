@@ -7,7 +7,10 @@
 namespace vrlog {
 
 // Opens the log next to our DLL. Safe to call more than once.
-void init();
+// `filename` names the file; null means the default. The two roles of this
+// binary (d3d9 and dinput8) are separate modules with separate FILE handles,
+// so they must not share one path or their lines interleave and truncate.
+void init(const char* filename = nullptr);
 void shutdown();
 
 void write(const char* fmt, ...);

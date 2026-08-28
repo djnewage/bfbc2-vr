@@ -12,3 +12,13 @@ EXPORTS
     D3DPERF_SetMarker
     D3DPERF_SetOptions
     D3DPERF_SetRegion
+
+; The same binary is installed a second time as dinput8.dll (the role is
+; chosen in DllMain from our own filename), so it must also present the real
+; dinput8 export surface. Extra exports are harmless in the d3d9 role.
+    DirectInput8Create
+    DllCanUnloadNow
+    DllGetClassObject
+    DllRegisterServer
+    DllUnregisterServer
+    GetdfDIJoystick

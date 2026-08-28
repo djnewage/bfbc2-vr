@@ -21,6 +21,10 @@ $ErrorActionPreference = 'Stop'
 $Root     = Split-Path $PSScriptRoot -Parent
 $Build    = Join-Path $Root 'build'
 $Target   = Join-Path $GameDir 'd3d9.dll'
+# The SAME binary is installed a second time under the dinput8 name. BFBC2Game
+# imports dinput8 and has no raw input at all, so that is where controller
+# input is injected; the DLL picks its role from its own filename at load.
+$DInputTarget = Join-Path $GameDir 'dinput8.dll'
 $DxvkName = Join-Path $GameDir 'dxvk_d3d9.dll'
 
 # --- identity -------------------------------------------------------------
@@ -45,6 +49,8 @@ function Get-DllKind([string]$path) {
 }
 
 function Remove-StaleCopies {
+    Get-ChildItem $GameDir -Filter 'dinput8.dll.stale-*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
     Get-ChildItem $GameDir -Filter 'd3d9.dll.stale-*' -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
     Remove-Item (Join-Path $GameDir 'd3d9.dll.dxvk-installed')    -Force -ErrorAction SilentlyContinue
@@ -62,6 +68,15 @@ if ($Uninstall) {
         'dxvk'    { Write-Host "d3d9.dll is DXVK, not ours - left in place." -ForegroundColor Cyan }
         'unknown' { Write-Host "d3d9.dll is unrecognized - left alone." -ForegroundColor Yellow }
         'absent'  { Write-Host "No d3d9.dll present." }
+    }
+
+    # Only ever remove a dinput8.dll that is provably ours. A genuine Microsoft
+    # one or another mod's proxy both read as 'unknown', and there is nothing to
+    # chain to here, so displacing a stranger's file would be pure damage.
+    switch (Get-DllKind $DInputTarget) {
+        'ours'    { Remove-Item $DInputTarget -Force; Write-Host "Removed bfbc2vr dinput8 proxy." -ForegroundColor Green }
+        'absent'  { }
+        default   { Write-Host "dinput8.dll is not ours - left alone." -ForegroundColor Yellow }
     }
 
     # Put DXVK back where dxvk.ps1 expects to find it.
@@ -153,6 +168,30 @@ if ($running -and (Test-Path $Target)) {
 
 Copy-Item $dll $Target -Force
 Write-Host "Installed proxy -> $Target" -ForegroundColor Green
+
+# --- input proxy -----------------------------------------------------------
+# Same binary, second name. Refuse to overwrite anything we did not write: a
+# real dinput8 or another mod's proxy both classify as 'unknown', and a partial
+# install is still a working install because the input path falls back to
+# SendInput when the wrappers do not report in.
+$dinputKind = Get-DllKind $DInputTarget
+if ($dinputKind -eq 'ours' -or $dinputKind -eq 'absent') {
+    if ($running -and (Test-Path $DInputTarget)) {
+        $staleDi = Join-Path $GameDir ("dinput8.dll.stale-" + [System.IO.Path]::GetRandomFileName().Substring(0,6))
+        try {
+            Move-Item $DInputTarget $staleDi -Force -ErrorAction Stop
+            $needsRestart = $true
+        } catch {
+            Write-Host "dinput8.dll is loaded and could not be renamed - close the game to update it." -ForegroundColor Yellow
+        }
+    }
+    if (-not (Test-Path $DInputTarget)) {
+        Copy-Item $dll $DInputTarget -Force
+        Write-Host "Installed input proxy -> $DInputTarget" -ForegroundColor Green
+    }
+} else {
+    Write-Host "dinput8.dll exists and is NOT ours - left untouched. Controller input will use the SendInput fallback." -ForegroundColor Yellow
+}
 
 # OpenVR runtime DLL (x86) - required since the proxy links openvr_api.lib.
 $openvrDll = Join-Path $Root 'thirdparty\openvr\bin\win32\openvr_api.dll'

@@ -22,6 +22,8 @@ add_library(d3d9 SHARED
     src/console.cpp
     src/memscan.cpp
     src/os_input.cpp
+    src/input_bus.cpp
+    src/dinput8_proxy.cpp
     src/aim_policy.cpp
     src/vrinput.cpp
     src/shader_registry.cpp
@@ -57,6 +59,7 @@ endif()
 # by LoadLibrary instead - see dllmain.cpp.
 target_link_libraries(d3d9 PRIVATE
     dxguid.lib
+    dinput8.lib
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/openvr/lib/win32/openvr_api.lib
 )
 

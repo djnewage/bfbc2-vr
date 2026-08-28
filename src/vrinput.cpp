@@ -1,6 +1,7 @@
 #include "vrinput.h"
 #include "aim_policy.h"
 #include "os_input.h"
+#include "input_bus.h"
 #include "vr_tracking.h"
 #include "camera_override.h"
 #include "logger.h"
@@ -17,6 +18,21 @@ namespace {
 using aimpolicy::StickKeys;
 
 bool  g_enabled = false;          // opt-in: 'input on'
+
+// TRANSPORT. SendInput was the bootstrap: it needs the game focused, Windows
+// pointer acceleration distorts relative motion, and a stray moment types into
+// whatever the user is really doing. BFBC2Game.exe imports dinput8 and has no
+// raw input at all, so the device state DirectInput hands the game is a better
+// place to inject - exact counts, focus-independent, and incapable of leaking
+// keystrokes elsewhere. 'auto' prefers it when the wrappers report in.
+enum class Path { Auto, DInput, SendInput, Off };
+Path g_path = Path::Auto;
+
+bool dinput_live() { return inputbus::hook_alive(); }
+bool use_dinput()
+{
+    return g_path == Path::DInput || (g_path == Path::Auto && dinput_live());
+}
 bool  g_swap_hands = false;       // left-handed mirror
 float g_snap_degrees = 30.0f;
 
@@ -119,7 +135,8 @@ void turn_body(float radians)
     g_pending.want_radians = radians;
     g_pending.yaw_before = yaw;
     g_pending.frames = 0;
-    osinput::send_mouse_move(dx, 0);
+    if (use_dinput()) inputbus::add_impulse(dx, 0);
+    else              osinput::send_mouse_move(dx, 0);
 }
 
 // Watch for the body to respond, then update the estimate.
@@ -164,10 +181,23 @@ void settle_turn()
     }
 }
 
+// The keys/buttons we want held this frame, as bus flags.
+std::uint32_t g_want_keys = 0, g_want_buttons = 0;
+// 'dik' test hold - proves the level path with no controller involved.
+std::uint32_t g_test_key = 0;
+DWORD g_test_until = 0;
+
+void publish()
+{
+    inputbus::publish_levels(g_want_keys, g_want_buttons);
+}
+
 } // namespace
 
 void release_all()
 {
+    g_want_keys = 0; g_want_buttons = 0;
+    publish();
     // Order does not matter, but nothing may be skipped: a key left down after
     // the mod stops driving it is the worst failure mode this module has.
     hold_key(g_held.keys.forward, false, 'W');
@@ -200,7 +230,11 @@ void on_present()
     // whatever the user is really doing. Never steal focus from here either -
     // this runs every frame.
     g_foreground = osinput::game_is_foreground();
-    if (!g_enabled || !g_foreground || !any_valid) {
+    // The foreground rule exists because SendInput sprays into whatever window
+    // is active. Injecting through DirectInput cannot reach another process, so
+    // that path does not need it.
+    const bool may_inject = use_dinput() ? true : g_foreground;
+    if (!g_enabled || !may_inject || !any_valid) {
         release_all();
         return;
     }
@@ -208,23 +242,52 @@ void on_present()
 
     const int mh = move_hand(), wh = weapon_hand();
 
-    // Movement.
+    // What we want held this frame.
     const StickKeys want = aimpolicy::stick_to_keys(g_in[mh].stick[0], g_in[mh].stick[1],
                                                     g_held.keys, g_stick_on, g_stick_off);
-    hold_key(g_held.keys.forward, want.forward, 'W');
-    hold_key(g_held.keys.back,    want.back,    'S');
-    hold_key(g_held.keys.left,    want.left,    'A');
-    hold_key(g_held.keys.right,   want.right,   'D');
-    hold_key(g_held.sprint, pressed(mh, kMaskStickClick), VK_LSHIFT);
+    const bool w_sprint = pressed(mh, kMaskStickClick);
+    const bool w_fire   = g_in[wh].trigger >= g_trigger_threshold;
+    const bool w_ads    = g_in[mh].trigger >= g_trigger_threshold;
+    const bool w_reload = g_in[wh].grip > 0.6f || pressed(wh, kMaskA);
+    const bool w_jump   = pressed(wh, kMaskB);
+    const bool w_crouch = pressed(mh, kMaskA);
+    const bool w_use    = pressed(mh, kMaskB);
+    const bool w_melee  = pressed(wh, kMaskStickClick);
 
-    // Actions.
-    hold_mouse(g_held.fire, g_in[wh].trigger >= g_trigger_threshold, false);
-    hold_mouse(g_held.ads,  g_in[mh].trigger >= g_trigger_threshold, true);
-    hold_key(g_held.reload, g_in[wh].grip > 0.6f || pressed(wh, kMaskA), 'R');
-    hold_key(g_held.jump,   pressed(wh, kMaskB), VK_SPACE);
-    hold_key(g_held.crouch, pressed(mh, kMaskA), VK_LCONTROL);
-    hold_key(g_held.use,    pressed(mh, kMaskB), 'E');
-    hold_key(g_held.melee,  pressed(wh, kMaskStickClick), 'F');
+    g_want_keys = 0;
+    if (want.forward) g_want_keys |= inputbus::kW;
+    if (want.back)    g_want_keys |= inputbus::kS;
+    if (want.left)    g_want_keys |= inputbus::kA;
+    if (want.right)   g_want_keys |= inputbus::kD;
+    if (w_sprint)     g_want_keys |= inputbus::kShift;
+    if (w_reload)     g_want_keys |= inputbus::kR;
+    if (w_jump)       g_want_keys |= inputbus::kSpace;
+    if (w_crouch)     g_want_keys |= inputbus::kCtrl;
+    if (w_use)        g_want_keys |= inputbus::kE;
+    if (w_melee)      g_want_keys |= inputbus::kF;
+    g_want_buttons = (w_fire ? inputbus::kLeft : 0u) | (w_ads ? inputbus::kRight : 0u);
+    if (g_test_key && GetTickCount() < g_test_until) g_want_keys |= g_test_key;
+    else g_test_key = 0;
+    publish();
+
+    // The DirectInput path takes the levels straight off the bus, so the
+    // SendInput edges must NOT also be sent - the game would see both.
+    if (!use_dinput()) {
+        hold_key(g_held.keys.forward, want.forward, 'W');
+        hold_key(g_held.keys.back,    want.back,    'S');
+        hold_key(g_held.keys.left,    want.left,    'A');
+        hold_key(g_held.keys.right,   want.right,   'D');
+        hold_key(g_held.sprint, w_sprint, VK_LSHIFT);
+        hold_mouse(g_held.fire, w_fire, false);
+        hold_mouse(g_held.ads,  w_ads,  true);
+        hold_key(g_held.reload, w_reload, 'R');
+        hold_key(g_held.jump,   w_jump,   VK_SPACE);
+        hold_key(g_held.crouch, w_crouch, VK_LCONTROL);
+        hold_key(g_held.use,    w_use,    'E');
+        hold_key(g_held.melee,  w_melee,  'F');
+    } else {
+        g_held.keys = want;   // keep the hysteresis state coherent across a switch
+    }
 
     // Snap turn: a real turn of the BODY through the game's own mouse look, so
     // the aim turns with it. The view follows for free, because the view is
@@ -261,6 +324,43 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         _snprintf_s(reply, n, _TRUNCATE, "snap turn %.0f degrees", g_snap_degrees);
         return true;
     }
+    if (!strcmp(cmd, "path")) {
+        if (has1) {
+            if (!_stricmp(a1, "auto")) g_path = Path::Auto;
+            else if (!_stricmp(a1, "dinput")) g_path = Path::DInput;
+            else if (!_stricmp(a1, "sendinput")) g_path = Path::SendInput;
+            else if (!_stricmp(a1, "off")) { g_path = Path::Off; release_all(); }
+        }
+        const auto* bus = inputbus::get();
+        const char* names[] = { "auto", "dinput", "sendinput", "off" };
+        _snprintf_s(reply, n, _TRUNCATE,
+                    "path=%s using=%s hook=%s devices=0x%X polls=%u consumed=(%d,%d)",
+                    names[static_cast<int>(g_path)], use_dinput() ? "dinput" : "sendinput",
+                    dinput_live() ? "LIVE" : "absent",
+                    bus ? bus->devices.load() : 0u, bus ? bus->polls.load() : 0u,
+                    bus ? bus->consumed_dx.load() : 0, bus ? bus->consumed_dy.load() : 0);
+        return true;
+    }
+    if (!strcmp(cmd, "dik")) {
+        // Hold one key for N milliseconds with no VR in the loop - the level
+        // path proven in isolation.
+        char b1[16] = {}, b2[16] = {};
+        if (args) sscanf_s(args, "%15s %15s", b1, static_cast<unsigned>(sizeof(b1)), b2, static_cast<unsigned>(sizeof(b2)));
+        if (!b1[0]) { _snprintf_s(reply, n, _TRUNCATE, "usage: dik <w|a|s|d|space|r|e|f> <ms>"); return true; }
+        struct { const char* nm; std::uint32_t f; } tbl[] = {
+            {"w",inputbus::kW},{"a",inputbus::kA},{"s",inputbus::kS},{"d",inputbus::kD},
+            {"space",inputbus::kSpace},{"r",inputbus::kR},{"e",inputbus::kE},{"f",inputbus::kF},
+            {"shift",inputbus::kShift},{"ctrl",inputbus::kCtrl},
+        };
+        std::uint32_t flag = 0;
+        for (const auto& t : tbl) if (!_stricmp(b1, t.nm)) flag = t.f;
+        if (!flag) { _snprintf_s(reply, n, _TRUNCATE, "dik: unknown key '%s'", b1); return true; }
+        g_test_key = flag;
+        g_test_until = GetTickCount() + static_cast<DWORD>(b2[0] ? atoi(b2) : 600);
+        _snprintf_s(reply, n, _TRUNCATE, "holding %s for %d ms via %s", b1, b2[0] ? atoi(b2) : 600,
+                    use_dinput() ? "dinput" : "sendinput");
+        return true;
+    }
     if (!strcmp(cmd, "mouse")) {
         // Diagnostic: does injected relative mouse motion reach the game at
         // all? Emits a raw delta and reports how far the body actually turned.
@@ -274,8 +374,14 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         // that is the difference between focus_game() and the per-frame
         // game_is_foreground() gate. Without this the test can never run,
         // because whoever asks for it is by definition in another window.
-        if (!osinput::focus_game()) { _snprintf_s(reply, n, _TRUNCATE, "mouse: could not focus the game - refusing to inject"); return true; }
-        osinput::send_mouse_move(dx, dy);
+        if (use_dinput()) {
+            inputbus::add_impulse(dx, dy);
+        } else {
+            // An explicit one-shot diagnostic may bring the game forward
+            // itself; the per-frame path never does.
+            if (!osinput::focus_game()) { _snprintf_s(reply, n, _TRUNCATE, "mouse: could not focus the game - refusing to inject"); return true; }
+            osinput::send_mouse_move(dx, dy);
+        }
         _snprintf_s(reply, n, _TRUNCATE, "mouse: sent dx=%d dy=%d (body yaw before %.2f deg%s) - re-run 'status' to see the result",
                     dx, dy, before * 180.0f / aimpolicy::kPi, had ? "" : ", NO CAMERA");
         return true;
@@ -303,6 +409,15 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
 
 void status(FILE* f)
 {
+    {
+        const auto* bus = inputbus::get();
+        fprintf(f, "input path: %s (using %s) hook=%s devices=0x%X polls=%u consumed=(%d,%d) events=%u\n",
+                g_path == Path::Auto ? "auto" : g_path == Path::DInput ? "dinput" : g_path == Path::SendInput ? "sendinput" : "off",
+                use_dinput() ? "dinput" : "sendinput", dinput_live() ? "LIVE" : "absent",
+                bus ? bus->devices.load() : 0u, bus ? bus->polls.load() : 0u,
+                bus ? bus->consumed_dx.load() : 0, bus ? bus->consumed_dy.load() : 0,
+                bus ? bus->injected_events.load() : 0u);
+    }
     fprintf(f, "input: %s %s-handed foreground=%d legacy=%d snaps=%u frames=%u\n",
             g_enabled ? "on" : "off", g_swap_hands ? "left" : "right",
             g_foreground ? 1 : 0, g_legacy_input_ok ? 1 : 0, g_snaps, g_frames_injected);

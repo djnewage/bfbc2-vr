@@ -34,14 +34,14 @@ std::string resolve_module_dir()
 
 } // namespace
 
-void init()
+void init(const char* filename)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_initialized) return;
     g_initialized = true;
 
     g_dir = resolve_module_dir();
-    const std::string path = g_dir + "bfbc2vr.log";
+    const std::string path = g_dir + (filename ? filename : "bfbc2vr.log");
 
     // _fsopen with _SH_DENYWR, NOT fopen_s. fopen_s opens with exclusive access,
     // which locks the log so hard that nothing can read it while the game runs -
