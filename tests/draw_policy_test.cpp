@@ -333,8 +333,141 @@ static void test_grip_delta()
     CHECK(!grip_delta_step_is_sane(a, b, 0.5f));
 }
 
+// --------------------------------------------------------------------------
+// Head orientation. These are the tests that pin the tilting-horizon bug: the
+// first version of the correction used two Euler scalars and failed both the
+// roll case and the yaw+pitch case.
+
+// An OpenVR 3x4 (column-vector rotation, +X right / +Y up / -Z forward) built
+// from intrinsic yaw, then pitch, then roll.
+static void make_pose(float yaw, float pitch, float roll, const float pos[3], float out[12])
+{
+    const float cy = std::cos(yaw),   sy = std::sin(yaw);
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+    const float cr = std::cos(roll),  sr = std::sin(roll);
+    const float Ry[3][3] = { { cy, 0, sy }, { 0, 1, 0 }, { -sy, 0, cy } };
+    const float Rx[3][3] = { { 1, 0, 0 }, { 0, cp, -sp }, { 0, sp, cp } };
+    const float Rz[3][3] = { { cr, -sr, 0 }, { sr, cr, 0 }, { 0, 0, 1 } };
+    float t[3][3] = {}, R[3][3] = {};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) { t[i][j] = 0; for (int k = 0; k < 3; ++k) t[i][j] += Ry[i][k] * Rx[k][j]; }
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) { R[i][j] = 0; for (int k = 0; k < 3; ++k) R[i][j] += t[i][k] * Rz[k][j]; }
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) out[r * 4 + c] = R[r][c];
+        out[r * 4 + 3] = pos ? pos[r] : 0.0f;
+    }
+}
+
+// Identity camera basis: right +x, up +y, forward +z. With this basis the
+// camera's world axes after the correction are just the rows of A = B*T, so
+// the assertions below read directly.
+static const float kIdentityBasis[9] = { 1,0,0, 0,1,0, 0,0,1 };
+
+static void test_head_orientation()
+{
+    const float origin[3] = { 0, 0, 0 };
+    float ref[12], now[12];
+    Mat4 rot;
+
+    // 1. Not moved: no correction.
+    make_pose(0.0f, 0.0f, 0.0f, origin, ref);
+    make_pose(0.0f, 0.0f, 0.0f, origin, now);
+    CHECK(head_world_rotation(now, ref, 0.0f, kIdentityBasis, rot));
+    Mat4 I; m4::identity(I);
+    CHECK(near_matrix(rot, I, 1e-5f));
+
+    // 2. PURE ROLL. Tilting the head must rotate the world about the view
+    //    axis: forward is preserved, up is tilted. The Euler construction
+    //    produced identity here - the horizon rolled with the head.
+    make_pose(0.0f, 0.0f, 0.5f, origin, now);
+    CHECK(head_world_rotation(now, ref, 0.0f, kIdentityBasis, rot));
+    {
+        const float fwd[3] = { 0, 0, 1 };
+        float f2[3];
+        for (int c = 0; c < 3; ++c)
+            f2[c] = fwd[0]*at(rot,0,c) + fwd[1]*at(rot,1,c) + fwd[2]*at(rot,2,c);
+        CHECK_NEAR(f2[0], 0.0f, 1e-4f);
+        CHECK_NEAR(f2[1], 0.0f, 1e-4f);
+        CHECK_NEAR(f2[2], 1.0f, 1e-4f);          // view axis unchanged
+        const float up[3] = { 0, 1, 0 };
+        float u2[3];
+        for (int c = 0; c < 3; ++c)
+            u2[c] = up[0]*at(rot,0,c) + up[1]*at(rot,1,c) + up[2]*at(rot,2,c);
+        CHECK(std::fabs(u2[0]) > 0.4f);          // world up genuinely tilted
+    }
+
+    // 3. YAW + PITCH COMBINED must stay ROLL-FREE. The camera's right axis is
+    //    row 0 of A = rot^-1 = rot^T; it must remain horizontal. This is the
+    //    reported bug: with the Euler construction, pitching and then turning
+    //    canted the horizon.
+    make_pose(0.6f, -0.35f, 0.0f, origin, now);
+    CHECK(head_world_rotation(now, ref, 0.0f, kIdentityBasis, rot));
+    {
+        // rot rotates the world; the camera's axes are the rows of its inverse.
+        Mat4 inv; CHECK(m4::invert(rot, inv));
+        const float right_y = at(inv, 0, 1);     // y component of camera right
+        CHECK_NEAR(right_y, 0.0f, 1e-3f);
+    }
+
+    // 4. And with roll added, the right axis SHOULD leave horizontal - by
+    //    exactly the roll. (Guards against "fixed" by force-levelling.)
+    make_pose(0.6f, -0.35f, 0.4f, origin, now);
+    CHECK(head_world_rotation(now, ref, 0.0f, kIdentityBasis, rot));
+    {
+        Mat4 inv; CHECK(m4::invert(rot, inv));
+        CHECK(std::fabs(at(inv, 0, 1)) > 0.3f);
+    }
+
+    // 5. A deliberate turn with a still head is a pure yaw of the view.
+    make_pose(0.0f, 0.0f, 0.0f, origin, now);
+    CHECK(head_world_rotation(now, ref, 0.5f, kIdentityBasis, rot));
+    {
+        Mat4 inv; CHECK(m4::invert(rot, inv));
+        CHECK_NEAR(at(inv, 0, 1), 0.0f, 1e-4f);   // no roll
+        CHECK(std::fabs(at(inv, 0, 2)) > 0.4f);   // but it did turn
+    }
+}
+
+static void test_eye_axis_and_lean()
+{
+    const float origin[3] = { 0, 0, 0 };
+    float ref[12], now[12];
+
+    // The eye baseline rides the HEAD's right axis, so a tilted head tilts the
+    // stereo separation. With a level head it matches the body's right.
+    make_pose(0.0f, 0.0f, 0.0f, origin, ref);
+    make_pose(0.0f, 0.0f, 0.0f, origin, now);
+    float right[3];
+    CHECK(head_right_in_world(now, ref, 0.0f, kIdentityBasis, right));
+    CHECK_NEAR(right[0], 1.0f, 1e-4f);
+    CHECK_NEAR(right[1], 0.0f, 1e-4f);
+
+    make_pose(0.0f, 0.0f, 0.6f, origin, now);      // ear to shoulder
+    CHECK(head_right_in_world(now, ref, 0.0f, kIdentityBasis, right));
+    CHECK(std::fabs(right[1]) > 0.3f);             // the baseline tilted with it
+
+    // Leaning is expressed in the frame the recenter defined. Recentre facing
+    // 90 degrees away from the tracking origin's forward, then lean along the
+    // tracking +x axis: in the game that must come out along the body's
+    // FORWARD, not its right. The first version mapped raw tracking axes
+    // straight through the camera basis and got this wrong.
+    make_pose(1.5707963f, 0.0f, 0.0f, origin, ref);
+    const float dpos[3] = { 0.2f, 0.0f, 0.0f };
+    float lean[3];
+    CHECK(lean_in_world(dpos, ref, 0.0f, kIdentityBasis, lean));
+    CHECK_NEAR(std::sqrt(lean[0]*lean[0] + lean[1]*lean[1] + lean[2]*lean[2]), 0.2f, 1e-3f);
+    CHECK(std::fabs(lean[2]) > 0.15f);             // along forward
+    CHECK_NEAR(lean[0], 0.0f, 1e-3f);              // not along right
+
+    // With no reference yaw it is a plain sideways lean.
+    make_pose(0.0f, 0.0f, 0.0f, origin, ref);
+    CHECK(lean_in_world(dpos, ref, 0.0f, kIdentityBasis, lean));
+    CHECK_NEAR(lean[0], 0.2f, 1e-3f);
+}
+
 int main()
 {
+    test_head_orientation();
+    test_eye_axis_and_lean();
     test_grip_delta();
     test_depth_slice_translation_is_exact();
     test_recover_roundtrip();

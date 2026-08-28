@@ -228,6 +228,119 @@ bool make_grip_delta(const Mat4 head_view, const Mat4 grip_view,
     return true;
 }
 
+void openvr_rotation_to_view(const float pose3x4[12], Mat4 out)
+{
+    m4::identity(out);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            at(out, r, c) = pose3x4[c * 4 + r];      // transpose to row-vector
+    // Conjugate by C = diag(1,1,-1): negate the elements with exactly one z.
+    at(out, 0, 2) = -at(out, 0, 2);
+    at(out, 1, 2) = -at(out, 1, 2);
+    at(out, 2, 0) = -at(out, 2, 0);
+    at(out, 2, 1) = -at(out, 2, 1);
+}
+
+void camera_basis(const float cam_rows[9], Mat4 out)
+{
+    m4::identity(out);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            at(out, r, c) = cam_rows[r * 3 + c];
+}
+
+namespace {
+
+// Rotations are orthonormal, so the inverse is the transpose - cheaper and
+// numerically kinder than a general inverse.
+void rotation_inverse(const Mat4 in, Mat4 out) { m4::transpose(in, out); }
+
+// v * M for a direction (no translation).
+void rotate_dir(const float v[3], const Mat4 M, float out[3])
+{
+    for (int c = 0; c < 3; ++c)
+        out[c] = v[0] * at(M, 0, c) + v[1] * at(M, 1, c) + v[2] * at(M, 2, c);
+}
+
+// B = R_now * R_ref^-1 : the head's rotation since the reference, expressed in
+// the frame the reference defined (which is the game camera's frame).
+bool head_relative(const float head_now[12], const float head_ref[12], Mat4 out)
+{
+    Mat4 rnow, rref, rinv;
+    openvr_rotation_to_view(head_now, rnow);
+    openvr_rotation_to_view(head_ref, rref);
+    rotation_inverse(rref, rinv);
+    m4::multiply(rnow, rinv, out);
+    for (int i = 0; i < 16; ++i) if (!std::isfinite(out[i])) return false;
+    return true;
+}
+
+} // namespace
+
+bool head_world_rotation(const float head_now[12], const float head_ref[12],
+                         float turn_yaw, const float cam_rows[9], Mat4 out)
+{
+    Mat4 B;
+    if (!head_relative(head_now, head_ref, B)) return false;
+
+    Mat4 T, A;
+    m4::rotation_y(turn_yaw, T);
+    m4::multiply(B, T, A);            // camera rotation relative to the body
+
+    // Conjugate into world space and invert: the correction rotates the WORLD,
+    // which is the inverse of rotating the camera.
+    //   W   = V * A * M_cw
+    //   rot = W^-1 = V * A^-1 * M_cw      (V = M_cw^-1 = M_cw^T)
+    Mat4 mcw, v, ainv, t1;
+    camera_basis(cam_rows, mcw);
+    rotation_inverse(mcw, v);
+    rotation_inverse(A, ainv);
+    m4::multiply(v, ainv, t1);
+    m4::multiply(t1, mcw, out);
+    for (int i = 0; i < 16; ++i) if (!std::isfinite(out[i])) return false;
+    return true;
+}
+
+bool head_right_in_world(const float head_now[12], const float head_ref[12],
+                         float turn_yaw, const float cam_rows[9], float out[3])
+{
+    Mat4 B;
+    if (!head_relative(head_now, head_ref, B)) return false;
+    Mat4 T, A, mcw;
+    m4::rotation_y(turn_yaw, T);
+    m4::multiply(B, T, A);
+    camera_basis(cam_rows, mcw);
+
+    const float right_local[3] = { 1.0f, 0.0f, 0.0f };
+    float right_cam[3];
+    rotate_dir(right_local, A, right_cam);      // head right, in camera coords
+    rotate_dir(right_cam, mcw, out);            // ... and in world
+    for (int i = 0; i < 3; ++i) if (!std::isfinite(out[i])) return false;
+    return true;
+}
+
+bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
+                   float turn_yaw, const float cam_rows[9], float out[3])
+{
+    Mat4 rref, rinv;
+    openvr_rotation_to_view(head_ref, rref);
+    rotation_inverse(rref, rinv);
+
+    // OpenVR is right-handed with -Z forward; our view space is left-handed
+    // with +Z forward, so the z component flips (C = diag(1,1,-1)).
+    const float d_lh[3] = { dpos_openvr[0], dpos_openvr[1], -dpos_openvr[2] };
+
+    float d_ref[3], d_body[3];
+    rotate_dir(d_lh, rinv, d_ref);              // into the reference's frame
+    Mat4 T; m4::rotation_y(turn_yaw, T);
+    rotate_dir(d_ref, T, d_body);               // carried by a deliberate turn
+
+    Mat4 mcw; camera_basis(cam_rows, mcw);
+    rotate_dir(d_body, mcw, out);
+    for (int i = 0; i < 3; ++i) if (!std::isfinite(out[i])) return false;
+    return true;
+}
+
 bool grip_delta_step_is_sane(const Mat4 previous, const Mat4 current, float max_step)
 {
     const float dx = at(current, 3, 0) - at(previous, 3, 0);

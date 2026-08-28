@@ -172,6 +172,59 @@ bool make_grip_delta(const m4::Mat4 head_view, const m4::Mat4 grip_view,
                      const m4::Mat4 ref_head_view, const m4::Mat4 ref_grip_view,
                      float units_per_metre, m4::Mat4 out);
 
+// ---------------------------------------------------------------------------
+// Head orientation (2026-08-27).
+//
+// The correction used to be built from two Euler scalars - yaw about world up
+// and pitch about the game camera's right axis. That has two defects, and the
+// horizon tilting in the headset was both of them at once:
+//
+//   1. Head ROLL was never extracted at all, so tilting the head did not
+//      counter-rotate the image and the virtual horizon rolled with the player.
+//   2. Pitch was applied about the BODY's right axis and yaw afterwards, so
+//      once pitched, turning rotated about an axis that was no longer the
+//      head's right - the composite was not a roll-free orientation, and the
+//      horizon tilted while merely looking around.
+//
+// Both disappear by carrying the head's full relative orientation, which is
+// what BFVR does (MakeD3D8ViewFromOpenXRPose is quaternion -> 3x3, never
+// Euler). Roll is stripped only where a consumer genuinely wants gravity
+// alignment - the HUD panel - not here.
+//
+// Derivation, row-vector and left-handed throughout:
+//   B    = R_now * R_ref^-1        head rotation, in reference-frame coords
+//   T    = yaw(turn)               deliberate turn of the virtual body
+//   A    = B * T                   camera rotation relative to the body
+//   W    = V * A * M_cw            the same rotation in world space
+//   rot  = W^-1 = V * T^-1 * B^-1 * M_cw
+// where M_cw is the game's camera-to-world basis (rows right/up/forward) and
+// V = M_cw^-1 = M_cw^T (it is orthonormal to six decimals - phase2-results.md).
+
+// Rotation part only of an OpenVR 3x4, in our row-vector left-handed
+// convention. Same transpose-and-conjugate as openvr_pose_to_view.
+void openvr_rotation_to_view(const float pose3x4[12], m4::Mat4 out);
+
+// The camera-to-world basis as a matrix (rows right/up/forward, no translation).
+void camera_basis(const float cam_rows[9], m4::Mat4 out);
+
+// The world-space rotation the correction needs. False if either pose is
+// degenerate.
+bool head_world_rotation(const float head_now[12], const float head_ref[12],
+                         float turn_yaw, const float cam_rows[9], m4::Mat4 out);
+
+// The head's right axis in world space - the axis the stereo eye baseline must
+// ride, so the eyes tilt with a tilted head instead of staying level.
+bool head_right_in_world(const float head_now[12], const float head_ref[12],
+                         float turn_yaw, const float cam_rows[9], float out[3]);
+
+// A positional head delta (raw OpenVR tracking axes, metres) expressed in the
+// game's world space. Rotating it into reference-frame coordinates first is
+// what makes leaning correct at any recenter heading; mapping the raw tracking
+// axes straight through the camera basis - as the first version did - is only
+// right when the reference happened to face the tracking origin's forward.
+bool lean_in_world(const float dpos_openvr[3], const float head_ref[12],
+                   float turn_yaw, const float cam_rows[9], float out[3]);
+
 // A discontinuity this large BETWEEN CONSECUTIVE ACCEPTED SAMPLES means
 // tracking glitched or the weapon changed; the caller re-calibrates rather
 // than teleporting the weapon (BFVR uses 0.50 m).

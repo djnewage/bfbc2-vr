@@ -53,6 +53,20 @@ float g_hmd_pitch    = 0.0f;
 // END toggles; F5 recenters position along with orientation.
 bool  g_pos_enabled  = true;
 float g_ref_pos[3]   = {};
+
+// The reference head POSE (OpenVR 3x4), captured at recenter. The Euler
+// reference above is kept for the status line, the HUD anchor and the turn
+// accumulator - all of which genuinely want a scalar heading - but the view
+// correction uses this, so head ROLL survives and the yaw/pitch composition
+// cannot inject roll of its own. See draw_policy.h for the derivation.
+float g_ref_head_pose[12] = { 1,0,0,0, 0,1,0,0, 0,0,1,0 };
+bool  g_have_ref_pose = false;
+
+// Deliberate turns (snap turn) rotate the virtual body by this much. It used
+// to be folded into g_ref_yaw; with a full-orientation reference it has to be
+// its own term, or a turn would be indistinguishable from a head movement.
+float g_turn_yaw = 0.0f;
+bool  g_full_orientation = true;   // 'headroll off' falls back to yaw+pitch
 float g_hmd_dpos[3]  = {};      // delta in OpenVR axes (+X right, +Y up, -Z fwd)
 
 // Alternate-eye rendering state. The IPD is in WORLD units and the engine's
@@ -421,6 +435,20 @@ int fingerprint_offset(void* shader, unsigned start, const float* data, unsigned
     return found;
 }
 
+// The live head pose as an OpenVR 3x4, the form draw_policy converts.
+bool head_pose_now(float out[12])
+{
+    if (!vrtrack::have_pose()) return false;
+    float rot[9], pos[3];
+    vrtrack::orientation(rot);
+    vrtrack::position(pos);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) out[r * 4 + c] = rot[r * 3 + c];
+        out[r * 4 + 3] = pos[r];
+    }
+    return true;
+}
+
 // Head-relative controller motion since calibration, in view space. Fails
 // closed: any missing or implausible sample drops the weapon back to its
 // native pose rather than putting it somewhere invented.
@@ -504,16 +532,29 @@ void rebuild_correction()
     std::memcpy(g_vp_inv, vp_inv, sizeof(g_vp_inv));
     g_have_vp_inv = true;
 
-    // The rotation: HMD yaw/pitch delta when tracking, synthetic spin otherwise.
+    // The rotation. The FULL relative head orientation - roll included, and
+    // composed so that yaw and pitch together cannot cant the horizon. The old
+    // Euler pair did both wrong; docs/head-orientation.md has the measurements.
     Mat4 rot;
-    if (g_hmd_active) {
-        const float wy[3] = { 0.0f, 1.0f, 0.0f };
-        Mat4 ry, rp;
-        rotation_axis(wy, g_yaw_sign * g_hmd_yaw, ry);
-        rotation_axis(g_cam_right, g_pitch_sign * g_hmd_pitch, rp);
-        multiply(rp, ry, rot);   // pitch about camera right, then yaw about world up
-    } else {
-        rotation_y(g_angle_rad, rot);
+    bool have_full = false;
+    float head_now[12];
+    if (g_hmd_active && g_full_orientation && g_have_ref_pose && head_pose_now(head_now)) {
+        have_full = drawpolicy::head_world_rotation(head_now, g_ref_head_pose, g_turn_yaw,
+                                                    g_cam_rows, rot);
+    }
+    if (!have_full) {
+        if (g_hmd_active) {
+            // Fallback ('headroll off', or before the first reference pose):
+            // the original yaw+pitch construction, kept so the mod still runs
+            // if the full path ever refuses.
+            const float wy[3] = { 0.0f, 1.0f, 0.0f };
+            Mat4 ry, rp;
+            rotation_axis(wy, g_yaw_sign * (g_hmd_yaw + g_turn_yaw), ry);
+            rotation_axis(g_cam_right, g_pitch_sign * g_hmd_pitch, rp);
+            multiply(rp, ry, rot);
+        } else {
+            rotation_y(g_angle_rad, rot);
+        }
     }
 
     Mat4 to_origin, back, r, tmp;
@@ -526,14 +567,22 @@ void rebuild_correction()
     // the WORLD the opposite way, which is the same as moving the camera.
     // OpenVR is +X right / +Y up / -Z forward, hence the negated Z term.
     if (g_pos_enabled && g_hmd_active) {
-        const float* right = &g_cam_rows[0];
-        const float* up    = &g_cam_rows[3];
-        const float* fwd   = &g_cam_rows[6];
         float off[3];
-        for (int i = 0; i < 3; ++i) {
-            off[i] = g_hmd_dpos[0] * right[i]
-                   + g_hmd_dpos[1] * up[i]
-                   + (-g_hmd_dpos[2]) * fwd[i];
+        // Rotate the delta into the frame the recenter defined before mapping
+        // it through the camera basis. Mapping the raw tracking axes straight
+        // through - as this did originally - is only correct when the
+        // reference happened to face the tracking origin's forward; at any
+        // other heading, leaning sideways slid the player the wrong way.
+        if (!(g_have_ref_pose &&
+              drawpolicy::lean_in_world(g_hmd_dpos, g_ref_head_pose, g_turn_yaw, g_cam_rows, off))) {
+            const float* right = &g_cam_rows[0];
+            const float* up    = &g_cam_rows[3];
+            const float* fwd   = &g_cam_rows[6];
+            for (int i = 0; i < 3; ++i) {
+                off[i] = g_hmd_dpos[0] * right[i]
+                       + g_hmd_dpos[1] * up[i]
+                       + (-g_hmd_dpos[2]) * fwd[i];
+            }
         }
         Mat4 move, r2;
         translation(-off[0], -off[1], -off[2], move);
@@ -551,8 +600,15 @@ void rebuild_correction()
         // here - applying it in both places would cancel itself out.
         const float half = 0.5f * g_ipd_world;
         const float side = (g_frame_eye == 0) ? +half : -half;
+        // Along the HEAD's right, not the body's: a tilted head must tilt the
+        // stereo baseline with it, or the eyes stay level while the view rolls.
+        float axis[3] = { g_cam_right[0], g_cam_right[1], g_cam_right[2] };
+        if (!(g_have_ref_pose && head_pose_now(head_now) &&
+              drawpolicy::head_right_in_world(head_now, g_ref_head_pose, g_turn_yaw, g_cam_rows, axis))) {
+            axis[0] = g_cam_right[0]; axis[1] = g_cam_right[1]; axis[2] = g_cam_right[2];
+        }
         Mat4 eye_shift, r2;
-        translation(side * g_cam_right[0], side * g_cam_right[1], side * g_cam_right[2], eye_shift);
+        translation(side * axis[0], side * axis[1], side * axis[2], eye_shift);
         multiply(r, eye_shift, r2);
         std::memcpy(r, r2, sizeof(r));
     }
@@ -896,9 +952,11 @@ void adjust_view_reference(float d_yaw, float d_pitch)
 
 void request_turn(float radians)
 {
-    // A deliberate turn: the view rotates, the body does not (the aim loop
-    // will walk the body around to follow the gun afterwards).
+    // A deliberate turn of the virtual body. With a full-orientation reference
+    // this must be its own term: folding it into the reference yaw would make
+    // it indistinguishable from a head movement.
     if (!std::isfinite(radians) || std::fabs(radians) > aimpolicy::kPi) return;
+    g_turn_yaw = aimpolicy::wrap_pi(g_turn_yaw + radians);
     adjust_view_reference(aimpolicy::turn_ref_delta(radians, g_yaw_sign), 0.0f);
 }
 
@@ -970,7 +1028,10 @@ void recenter()
         vrtrack::position(pos);
         g_ref_yaw = yaw; g_ref_pitch = pitch;
         std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
-        VRLOG("[vr] reference recentered (orientation + position)");
+        g_have_ref_pose = head_pose_now(g_ref_head_pose);
+        g_turn_yaw = 0.0f;
+        VRLOG("[vr] reference recentered (full orientation%s + position)",
+              g_have_ref_pose ? "" : " UNAVAILABLE - falling back to yaw/pitch");
     } else {
         VRLOG("[correct] angle reset; eye=(%.2f, %.2f, %.2f)", g_eye[0], g_eye[1], g_eye[2]);
     }
@@ -1030,6 +1091,8 @@ void on_present()
             g_hmd_active = true;
             g_ref_yaw = yaw; g_ref_pitch = pitch;
             std::memcpy(g_ref_pos, pos, sizeof(g_ref_pos));
+            g_have_ref_pose = head_pose_now(g_ref_head_pose);
+            g_turn_yaw = 0.0f;
             VRLOG("[vr] head tracking engaged (ref yaw=%.1f pitch=%.1f deg, pos %.2f/%.2f/%.2f)",
                   yaw * 180.0f / kPi, pitch * 180.0f / kPi, pos[0], pos[1], pos[2]);
         }
@@ -1329,6 +1392,13 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         _snprintf_s(reply, n, _TRUNCATE, "%zu hidden prefixes; %u draws hidden last frame", g_hide_n, g_hidden_draws_last);
         return true;
     }
+    if (!strcmp(cmd, "headroll")) {
+        if (has1) g_full_orientation = (!_stricmp(a1, "on") || !strcmp(a1, "1"));
+        _snprintf_s(reply, n, _TRUNCATE, "full head orientation %s (reference pose %s)",
+                    g_full_orientation ? "on" : "off (yaw+pitch fallback)",
+                    g_have_ref_pose ? "captured" : "MISSING");
+        return true;
+    }
     if (!strcmp(cmd, "pitchsign") || !strcmp(cmd, "yawsign")) {
         float& sgn = (cmd[0] == 'p') ? g_pitch_sign : g_yaw_sign;
         if (has1) sgn = (atof(a1) < 0) ? -1.0f : 1.0f;
@@ -1350,6 +1420,8 @@ void status(FILE* f)
     fprintf(f, "correct=%d hmd=%d eye=%d ipd=%.4f%s pos6dof=%d frame=%u modified/frame=%u\n",
             g_correct_on ? 1 : 0, g_hmd_active ? 1 : 0, g_frame_eye, g_ipd_world, g_ipd_manual ? "(manual)" : "",
             g_pos_enabled ? 1 : 0, g_frame_index, g_modified_last_frame);
+    fprintf(f, "head: full-orientation=%d ref-pose=%d turn-offset=%.1f deg\n",
+            g_full_orientation ? 1 : 0, g_have_ref_pose ? 1 : 0, g_turn_yaw * 180.0f / kPi);
     fprintf(f, "hmd yaw=%.1f pitch=%.1f deg  dpos=(%.3f %.3f %.3f)\n",
             yaw * 180.0f / kPi, pitch * 180.0f / kPi, g_hmd_dpos[0], g_hmd_dpos[1], g_hmd_dpos[2]);
     fprintf(f, "fov: auto=%d manual=%.2f widen=%.2f/%.2f  world tan=%.4f/%.4f near=%.3f far=%.1f (deg %.1f x %.1f)\n",
