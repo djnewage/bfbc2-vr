@@ -174,7 +174,14 @@ bool  g_fov_auto    = false;
 // built per draw around the draw's OWN projection (cached per distinct P,
 // ~4 per frame); the global form is just the P' == P special case and stays
 // as the fallback for writes whose projection cannot be recovered.
-float g_vm_push   = 0.0f;    // metres forward along the body camera; 0 chosen in-headset 2026-08-20 (-/= tune)
+// Static weapon offset in the body camera's frame, metres: +x right, +y up,
+// +z forward. The engine draws the viewmodel where a flat game wants it, and
+// calibration cannot move it (calibration only zeroes the DELTA), so bringing
+// the weapon to where a held rifle belongs needs this. z goes NEGATIVE to pull
+// it toward the eye - the first version only allowed pushing away, which was
+// the wrong direction for the complaint it was meant to answer.
+float g_vm_off[3] = { 0.0f, 0.0f, 0.0f };
+float& g_vm_push = g_vm_off[2];   // '-'/'=' and the 'push' command drive z
 
 // PHASE 7a - the weapon follows a motion controller.
 //
@@ -658,16 +665,22 @@ const float* viewmodel_correction(const drawpolicy::ProjParams& p, bool with_off
     // The weapon's offset in the body camera's frame: the controller delta
     // when one is live, otherwise the manual push.
     Mat4 delta;
+    const bool any_offset = std::fabs(g_vm_off[0]) + std::fabs(g_vm_off[1]) + std::fabs(g_vm_off[2]) > 0.001f;
     if (with_offset && g_grip_active) {
         std::memcpy(delta, g_grip_delta, sizeof(delta));
-        if (g_vm_push > 0.001f) {
-            Mat4 push, combined;
-            translation(0.0f, 0.0f, g_vm_push, push);
-            multiply(delta, push, combined);
+        if (any_offset) {
+            // Applied after the grip delta, so the offset lives in the
+            // weapon's own frame and travels with the hand rather than being
+            // pinned to the body.
+            Mat4 off, combined;
+            translation(g_vm_off[0], g_vm_off[1], g_vm_off[2], off);
+            multiply(delta, off, combined);
             std::memcpy(delta, combined, sizeof(delta));
         }
+    } else if (with_offset && any_offset) {
+        translation(g_vm_off[0], g_vm_off[1], g_vm_off[2], delta);
     } else {
-        translation(0.0f, 0.0f, with_offset ? g_vm_push : 0.0f, delta);   // D3D view space: +z forward
+        identity(delta);
     }
 
     slot->key = p;
@@ -1079,8 +1092,8 @@ void on_present()
 
     // Viewmodel distance: '-' pulls the gun closer, '=' pushes it away.
     if (key_pressed(VK_OEM_MINUS)) {
-        g_vm_push = (std::max)(g_vm_push - 0.05f, 0.0f);
-        VRLOG("[viewmodel] push -> %.2f m%s", g_vm_push, g_vm_push == 0.0f ? " (off)" : "");
+        g_vm_push = (std::max)(g_vm_push - 0.05f, -1.5f);
+        VRLOG("[viewmodel] offset forward -> %.2f m%s", g_vm_push, g_vm_push == 0.0f ? " (none)" : "");
     }
     if (key_pressed(VK_OEM_PLUS)) {
         g_vm_push = (std::min)(g_vm_push + 0.05f, 1.0f);
@@ -1196,8 +1209,20 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         return true;
     }
     if (!strcmp(cmd, "push")) {
-        if (has1) g_vm_push = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.0f), 2.0f);
-        _snprintf_s(reply, n, _TRUNCATE, "viewmodel push %.2f m", g_vm_push);
+        if (has1) g_vm_push = (std::min)((std::max)(static_cast<float>(atof(a1)), -1.5f), 2.0f);
+        _snprintf_s(reply, n, _TRUNCATE, "weapon offset forward %.2f m (negative pulls it toward you)", g_vm_push);
+        return true;
+    }
+    if (!strcmp(cmd, "gripoffset") || !strcmp(cmd, "weaponoffset")) {
+        char b1[32] = {}, b2[32] = {}, b3[32] = {};
+        if (args) sscanf_s(args, "%31s %31s %31s", b1, static_cast<unsigned>(sizeof(b1)),
+                           b2, static_cast<unsigned>(sizeof(b2)), b3, static_cast<unsigned>(sizeof(b3)));
+        if (b1[0] && b2[0] && b3[0]) {
+            const float v[3] = { static_cast<float>(atof(b1)), static_cast<float>(atof(b2)), static_cast<float>(atof(b3)) };
+            for (int i = 0; i < 3; ++i) g_vm_off[i] = (std::min)((std::max)(v[i], -1.5f), 2.0f);
+        }
+        _snprintf_s(reply, n, _TRUNCATE, "weapon offset (right %.2f, up %.2f, forward %.2f) m",
+                    g_vm_off[0], g_vm_off[1], g_vm_off[2]);
         return true;
     }
     if (!strcmp(cmd, "ownproj")) {
@@ -1296,6 +1321,7 @@ void status(FILE* f)
             g_vm_mode, g_vm_push, g_ownproj_on ? 1 : 0, g_vm_th.require_bones ? 1 : 0, g_vm_hits_last, g_vm_ownp_last, g_hidden_draws_last, g_hide_n);
     fprintf(f, "vm-hist view-space <0.1:%u <0.5:%u <1:%u <2:%u <5:%u >5:%u\n",
             g_vm_hist_last[0], g_vm_hist_last[1], g_vm_hist_last[2], g_vm_hist_last[3], g_vm_hist_last[4], g_vm_hist_last[5]);
+    fprintf(f, "weapon offset: right=%.2f up=%.2f forward=%.2f m\n", g_vm_off[0], g_vm_off[1], g_vm_off[2]);
     fprintf(f, "grip: %s hand=%s calibrated=%d active=%d scale=%.2f smooth=%.2f resets=%u controllers(l=%d r=%d) delta=(%.3f %.3f %.3f)\n",
             g_grip_on ? "on" : "off", g_grip_hand ? "right" : "left", g_grip_calibrated ? 1 : 0,
             g_grip_active ? 1 : 0, g_grip_units_per_metre, g_grip_smooth, g_grip_resets,
