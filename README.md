@@ -20,8 +20,11 @@ no source, through a `d3d9.dll` proxy on DXVK submitting to SteamVR.
 - **A command channel** (`bfbc2vr_cmd.txt`) + status file + in-process memory scanner, so the
   mod can be driven, measured and screenshotted without touching the keyboard
 
-**Not done yet:** motion-controlled gun handling (the real goal), ADS/scope handling, comfort
-options. See `docs/architecture.md` for the roadmap.
+- **Play from the motion controllers** — move, fire, reload, jump, crouch, sprint, ADS, and
+  snap turn (`docs/controls.md`)
+
+**Not done yet:** bullets still follow the engine's aim rather than the barrel (the aim
+convergence loop is designed but not built), and comfort options. See `docs/architecture.md`.
 
 Everything here was built by measurement rather than guesswork; the `docs/` folder is the
 evidence trail, including three bugs that survived weeks because nothing was verified against
@@ -102,6 +105,7 @@ docs/console.md       commands, status file, and how the FOV was found
 docs/viewmodel-census.md   what the draw census proved, and the bugs it caught
 docs/prior-art-bfvr.md     what transfers from the shipped BF1942 VR mod
 docs/bc2-engine.md         public Frostbite 1.5 class layouts + the reflection system
+docs/controls.md           playing from the motion controllers
 tools/                build/install, DXVK, settings, and recon scripts
 ```
 

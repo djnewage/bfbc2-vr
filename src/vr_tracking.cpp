@@ -25,6 +25,8 @@ float g_render_pos[3] = { 0,0,0 };
 bool  g_ctl_valid[2] = { false, false };
 bool  g_ctl_seen[2]  = { false, false };
 float g_ctl[2][12]   = {};
+unsigned g_ctl_seq[2] = { 0, 0 };
+vr::TrackedDeviceIndex_t g_ctl_index[2] = { vr::k_unTrackedDeviceIndexInvalid, vr::k_unTrackedDeviceIndexInvalid };
 
 void store_controller(int hand, const vr::TrackedDevicePose_t& p)
 {
@@ -36,9 +38,15 @@ void store_controller(int hand, const vr::TrackedDevicePose_t& p)
     g_ctl_seen[hand] = p.bDeviceIsConnected;
     if (!ok) { g_ctl_valid[hand] = false; return; }
     const auto& m = p.mDeviceToAbsoluteTracking.m;
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 4; ++c)
-            g_ctl[hand][r * 4 + c] = m[r][c];
+    bool changed = !g_ctl_valid[hand];
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            const float v = m[r][c];
+            if (v != g_ctl[hand][r * 4 + c]) changed = true;
+            g_ctl[hand][r * 4 + c] = v;
+        }
+    }
+    if (changed) ++g_ctl_seq[hand];
     g_ctl_valid[hand] = true;
 }
 
@@ -49,6 +57,7 @@ void refresh_controllers(const vr::TrackedDevicePose_t* poses, unsigned count)
         const auto role = (hand == 0) ? vr::TrackedControllerRole_LeftHand
                                       : vr::TrackedControllerRole_RightHand;
         const vr::TrackedDeviceIndex_t idx = g_system->GetTrackedDeviceIndexForControllerRole(role);
+        g_ctl_index[hand] = idx;
         if (idx == vr::k_unTrackedDeviceIndexInvalid || idx >= count) {
             g_ctl_valid[hand] = false; g_ctl_seen[hand] = false;
             continue;
@@ -174,6 +183,40 @@ bool controller_pose(int hand, float out3x4[12])
 bool controller_connected(int hand)
 {
     return (hand >= 0 && hand <= 1) && g_ctl_seen[hand];
+}
+
+unsigned controller_sequence(int hand)
+{
+    return (hand >= 0 && hand <= 1) ? g_ctl_seq[hand] : 0u;
+}
+
+bool controller_input(int hand, ControllerInput& out)
+{
+    out = ControllerInput{};
+    if (!g_system || hand < 0 || hand > 1) return false;
+    const vr::TrackedDeviceIndex_t idx = g_ctl_index[hand];
+    if (idx == vr::k_unTrackedDeviceIndexInvalid) return false;
+
+    vr::VRControllerState_t st = {};
+    if (!g_system->GetControllerState(idx, &st, sizeof(st))) {
+        // Legacy input is off (SteamVR can disable it when an application
+        // declares an action manifest). Say so once - it is the difference
+        // between "no buttons wired" and "buttons wired but ignored".
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            VRLOG("[input] GetControllerState refused for %s hand - SteamVR legacy input may be disabled",
+                  hand ? "right" : "left");
+        }
+        return false;
+    }
+    out.valid = true;
+    out.buttons = st.ulButtonPressed;
+    out.stick[0] = st.rAxis[0].x;
+    out.stick[1] = st.rAxis[0].y;
+    out.trigger = st.rAxis[1].x;
+    out.grip = st.rAxis[2].x;
+    return true;
 }
 
 void orientation(float out3x3[9])

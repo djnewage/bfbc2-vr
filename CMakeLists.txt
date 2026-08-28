@@ -21,6 +21,9 @@ add_library(d3d9 SHARED
     src/draw_diag.cpp
     src/console.cpp
     src/memscan.cpp
+    src/os_input.cpp
+    src/aim_policy.cpp
+    src/vrinput.cpp
     src/shader_registry.cpp
     src/vr_tracking.cpp
     src/vr_compositor.cpp
@@ -70,4 +73,12 @@ if(BFBC2VR_BUILD_TESTS)
         set_property(TARGET draw_policy_tests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
     add_test(NAME draw_policy COMMAND draw_policy_tests)
+
+    add_executable(aim_policy_tests tests/aim_policy_test.cpp src/aim_policy.cpp)
+    target_include_directories(aim_policy_tests PRIVATE src)
+    if(MSVC)
+        target_compile_options(aim_policy_tests PRIVATE /W4 /permissive-)
+        set_property(TARGET aim_policy_tests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    add_test(NAME aim_policy COMMAND aim_policy_tests)
 endif()

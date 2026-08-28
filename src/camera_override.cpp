@@ -5,6 +5,8 @@
 #include "draw_policy.h"
 #include "draw_diag.h"
 #include "memscan.h"
+#include "vrinput.h"
+#include "aim_policy.h"
 #include "mat4.h"
 #include "logger.h"
 
@@ -880,6 +882,43 @@ int on_draw(const void* return_address, bool indexed, unsigned prim_count)
     return verdict;
 }
 
+// Moving the view means moving the HMD reference. g_hmd_yaw/pitch for this
+// frame were already computed from the old reference by on_present(), so both
+// must change together or the turn lands a frame late and shimmers.
+void adjust_view_reference(float d_yaw, float d_pitch)
+{
+    if (!std::isfinite(d_yaw) || !std::isfinite(d_pitch)) return;
+    g_ref_yaw   += d_yaw;
+    g_ref_pitch += d_pitch;
+    g_hmd_yaw   -= d_yaw;
+    g_hmd_pitch -= d_pitch;
+}
+
+void request_turn(float radians)
+{
+    // A deliberate turn: the view rotates, the body does not (the aim loop
+    // will walk the body around to follow the gun afterwards).
+    if (!std::isfinite(radians) || std::fabs(radians) > aimpolicy::kPi) return;
+    adjust_view_reference(aimpolicy::turn_ref_delta(radians, g_yaw_sign), 0.0f);
+}
+
+void compensate_body_turn(float body_delta_radians)
+{
+    if (!std::isfinite(body_delta_radians)) return;
+    adjust_view_reference(aimpolicy::compensation_ref_delta(body_delta_radians, g_yaw_sign), 0.0f);
+}
+
+bool game_camera_angles(float& yaw, float& pitch)
+{
+    if (!g_have_eye) return false;
+    const float f[3] = { g_cam_rows[6], g_cam_rows[7], g_cam_rows[8] };
+    static float s_last_yaw = 0.0f;
+    yaw = aimpolicy::yaw_from_forward(f, s_last_yaw);
+    s_last_yaw = yaw;
+    pitch = aimpolicy::pitch_from_forward(f);
+    return true;
+}
+
 bool body_frame(float& yaw, float& pitch, float pos[3])
 {
     if (!g_hmd_active) return false;
@@ -1006,6 +1045,10 @@ void on_present()
         g_angle_rad += dt * kDegPerSecond * kPi / 180.0f;
         if (g_angle_rad > 2.0f * kPi) g_angle_rad -= 2.0f * kPi;
     }
+    // Controller input runs here: after the head deltas exist (it may move the
+    // view reference) and before the correction is built from them.
+    vrinput::on_present();
+
     ++g_frame_index;
     rebuild_correction();
     drawdiag::on_present();

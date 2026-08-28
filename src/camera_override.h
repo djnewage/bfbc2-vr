@@ -74,6 +74,23 @@ bool body_frame(float& yaw, float& pitch, float pos[3]);
 // The live head frame in tracking space (current pose).
 bool head_frame(float& yaw, float& pitch, float pos[3]);
 
+// Rotate the PRESENTED view by `radians` (positive = left, matching the yaw
+// convention in aim_policy.h). Used by snap turn. This is the only sanctioned
+// way to move the view reference; it keeps the already-computed head delta
+// consistent within the same frame, which a bare write to the reference would
+// not.
+void request_turn(float radians);
+
+// Hold the presented view still while the game's body turns by `body_delta`
+// radians - the counterpart to request_turn, and opposite-signed into the same
+// reference. For the aim loop (stage 2).
+void compensate_body_turn(float body_delta_radians);
+
+// The game's own camera yaw/pitch this frame, from the camera-to-world basis
+// (c189). This is the authoritative pre-VR body camera: the mod never writes
+// it. False before the first camera constant of the level arrives.
+bool game_camera_angles(float& yaw, float& pitch);
+
 // Command channel (console.h): widen/auto/mode/push/ownproj/bones/recenter/fov.
 // Returns true if handled; reply goes to `reply`.
 bool command(const char* cmd, const char* args, char* reply, size_t reply_size);

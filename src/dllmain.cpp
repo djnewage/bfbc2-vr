@@ -8,6 +8,7 @@
 // native D3D9 path.
 
 #include "logger.h"
+#include "vrinput.h"
 #include "wrappers.h"
 
 #include <windows.h>
@@ -79,6 +80,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         break;
     case DLL_PROCESS_DETACH:
         VRLOG("[init] detaching");
+        vrinput::release_all();   // never leave a key held down behind us
         vrlog::shutdown();
         break;
     default:

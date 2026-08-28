@@ -51,6 +51,24 @@ bool have_pose();
 bool controller_pose(int hand, float out3x4[12]);
 bool controller_connected(int hand);
 
+// Bumped only when a controller's pose actually changes. The game presents
+// faster than the runtime produces poses (alternate-eye rendering), so any
+// per-sample logic - the aim loop above all - must dedup on this rather than
+// acting once per rendered frame.
+unsigned controller_sequence(int hand);
+
+// Buttons and analog axes, from OpenVR's legacy controller state. `buttons` is
+// the raw ulButtonPressed mask (see vr::EVRButtonId); stick is axis 0 and
+// trigger axis 1 on both Index and Touch-style controllers.
+struct ControllerInput {
+    bool     valid = false;
+    unsigned long long buttons = 0;
+    float    stick[2] = { 0.0f, 0.0f };
+    float    trigger = 0.0f;
+    float    grip = 0.0f;
+};
+bool controller_input(int hand, ControllerInput& out);
+
 // The HMD orientation as a row-major 3x3 in OpenVR's right-handed, Y-up,
 // -Z-forward convention, relative to the seated/standing origin.
 void orientation(float out3x3[9]);

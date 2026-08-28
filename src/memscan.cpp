@@ -1,4 +1,5 @@
 #include "memscan.h"
+#include "os_input.h"
 #include "camera_override.h"
 #include "logger.h"
 
@@ -207,60 +208,12 @@ struct Lock { float* addr; float value; };
 std::vector<Lock> g_locks;
 std::vector<float*> g_watches;
 
-// ---- game window + synthetic input (for autonomous state changes) ----
-HWND g_game_hwnd = nullptr;
-
-BOOL CALLBACK find_game_window(HWND h, LPARAM)
-{
-    DWORD pid = 0;
-    GetWindowThreadProcessId(h, &pid);
-    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || GetWindow(h, GW_OWNER)) return TRUE;
-    RECT r = {};
-    GetWindowRect(h, &r);
-    if (r.right - r.left < 200 || r.bottom - r.top < 200) return TRUE;
-    g_game_hwnd = h;
-    return FALSE;
-}
-
-HWND game_window()
-{
-    if (!g_game_hwnd || !IsWindow(g_game_hwnd)) { g_game_hwnd = nullptr; EnumWindows(find_game_window, 0); }
-    return g_game_hwnd;
-}
-
-bool focus_game()
-{
-    HWND h = game_window();
-    if (!h) return false;
-    if (GetForegroundWindow() == h) return true;
-    const DWORD fg_thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
-    const DWORD me = GetCurrentThreadId();
-    if (fg_thread && fg_thread != me) AttachThreadInput(me, fg_thread, TRUE);
-    AllowSetForegroundWindow(ASFW_ANY);
-    BringWindowToTop(h);
-    SetForegroundWindow(h);
-    SetActiveWindow(h);
-    if (fg_thread && fg_thread != me) AttachThreadInput(me, fg_thread, FALSE);
-    return GetForegroundWindow() == h;
-}
-
-void send_mouse_button(bool right, bool down)
-{
-    INPUT in = {};
-    in.type = INPUT_MOUSE;
-    in.mi.dwFlags = right ? (down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP)
-                          : (down ? MOUSEEVENTF_LEFTDOWN  : MOUSEEVENTF_LEFTUP);
-    SendInput(1, &in, sizeof(in));
-}
-
-void send_key(WORD vk, bool down)
-{
-    INPUT in = {};
-    in.type = INPUT_KEYBOARD;
-    in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
-    in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
-    SendInput(1, &in, sizeof(in));
-}
+// Synthetic input lives in os_input.h now, shared with vrinput. The rule it
+// carries is unchanged: never inject unless the game is the foreground window.
+using osinput::focus_game;
+using osinput::game_window;
+using osinput::send_key;
+using osinput::send_mouse_button;
 
 // ---- engine FOV control ----
 // The engine's camera vertical FOV in degrees lives in a heap object (found

@@ -2,6 +2,7 @@
 #include "camera_override.h"
 #include "vr_compositor.h"
 #include "memscan.h"
+#include "vrinput.h"
 #include "draw_diag.h"
 #include "logger.h"
 
@@ -24,6 +25,7 @@ void write_status()
     camover::status(f);
     vrcomp::status(f);
     memscan::status(f);
+    vrinput::status(f);
     fprintf(f, "census: %s\n", drawdiag::capturing() ? "capturing" : "idle");
     fclose(f);
 }
@@ -48,6 +50,7 @@ void run_line(const char* line)
     if (!handled) handled = camover::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = vrcomp::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = memscan::command(cmd, args, reply, sizeof(reply));
+    if (!handled) handled = vrinput::command(cmd, args, reply, sizeof(reply));
     if (!handled) _snprintf_s(reply, sizeof(reply), _TRUNCATE, "unknown command '%s'", cmd);
     VRLOG("[cmd] %s %s -> %s", cmd, args ? args : "", reply);
 }
