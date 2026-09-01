@@ -107,6 +107,9 @@ constexpr float kMaxProjShrinkPerFrame = 0.5f;
 // really did change and accept it. Bounds the cost of a wrong hold to a few
 // frames, and stops the gate latching onto whatever it saw first.
 constexpr unsigned kWorldProjRunToAccept = 10;
+// Same idea for the camera heading. Kept short: every frame spent refusing is a
+// frame the aim loop cannot run and a snap turn would be discarded.
+constexpr unsigned kCamYawRunToAccept = 10;
 unsigned g_world_proj_rejected = 0;
 unsigned g_world_proj_run = 0;
 
@@ -162,6 +165,9 @@ float g_vp[16]         = {};   // last seen view-projection, from c185-c188
 float g_vp_inv[16]     = {};   // its inverse, refreshed with the correction
 bool  g_have_vp        = false;
 bool  g_have_vp_inv    = false;
+// Declared here rather than beside g_eye below: promote_player_camera() sets it
+// and is defined with the candidate table, above that point.
+bool  g_have_eye       = false;
 
 // Fingerprint cache for "constants"-blob shaders: (shader, write start) ->
 // matrix offset within the write in vec4s, or -1 for "scanned, none found".
@@ -172,7 +178,122 @@ unsigned g_fp_found = 0, g_fp_rejected = 0;
 float g_eye[3]         = {};   // camera position, from c192
 float g_cam_right[3]   = { 1, 0, 0 };   // camera right axis, from c189 row 0
 float g_cam_rows[9]    = { 1,0,0, 0,1,0, 0,0,1 };   // full camera-to-world 3x3
-bool  g_have_eye       = false;
+
+// Camera candidates seen during the current frame.
+//
+// c185..c192 is ONE contiguous block holding both the view-projection and the
+// camera-to-world transform, and every pass that renders geometry writes it -
+// shadow cascades, reflections, the main scene. Latching "whoever wrote last"
+// meant a foreign pass could take both at once: the world field collapsed from
+// 58.9 to 18.5 degrees (black-boxing the headset and making the weapon
+// unclassifiable) while g_cam_rows simultaneously took that camera's heading,
+// which stalled the aim loop and threw away every snap turn.
+//
+// So collect them instead, and pick the player's at end of frame.
+constexpr int kMaxCamCandidates = 8;
+struct CamCandidate {
+    float vp[16] = {};
+    float rows[9] = {};
+    float right[3] = {};
+    float eye[3] = {};
+    bool  have_cam = false;
+    drawpolicy::ProjParams proj{};
+    unsigned weight = 0;          // constant writes that used this camera
+};
+CamCandidate g_cand[kMaxCamCandidates];
+int g_cand_n = 0;
+int g_cand_cur = -1;              // candidate the current write belongs to
+unsigned g_cam_candidates_last = 0;
+unsigned g_cam_promote_failed = 0;
+drawpolicy::ProjParams g_prev_player_proj{};
+
+bool tangents_match(const drawpolicy::ProjParams& a, const drawpolicy::ProjParams& b)
+{
+    if (a.perspective != b.perspective) return false;
+    if (!a.perspective) return true;          // all non-perspective lumped together
+    const float ah = a.tan_half_h(), bh = b.tan_half_h();
+    const float av = a.tan_half_v(), bv = b.tan_half_v();
+    if (!(ah > 1e-6f) || !(bh > 1e-6f) || !(av > 1e-6f) || !(bv > 1e-6f)) return false;
+    return std::fabs(ah / bh - 1.0f) < 0.01f && std::fabs(av / bv - 1.0f) < 0.01f;
+}
+
+void note_camera_candidate(const float* vp)
+{
+    // Fast path. A pass writes the same view-projection for every draw in it,
+    // so the overwhelmingly common case is "identical to the one we just saw".
+    // The old code here was a 64-byte memcpy; recovering the projection on
+    // every write instead would put real arithmetic on a very hot path.
+    if (g_cand_cur >= 0 && g_cand_cur < g_cand_n &&
+        std::memcmp(vp, g_cand[g_cand_cur].vp, sizeof(g_cand[g_cand_cur].vp)) == 0) {
+        ++g_cand[g_cand_cur].weight;
+        return;
+    }
+
+    drawpolicy::ProjParams p{};
+    drawpolicy::recover_projection(vp, p);    // failure leaves perspective=false
+    for (int i = 0; i < g_cand_n; ++i) {
+        if (!tangents_match(g_cand[i].proj, p)) continue;
+        ++g_cand[i].weight;
+        std::memcpy(g_cand[i].vp, vp, sizeof(g_cand[i].vp));
+        g_cand_cur = i;
+        return;
+    }
+    if (g_cand_n >= kMaxCamCandidates) { g_cand_cur = -1; return; }
+    CamCandidate& c = g_cand[g_cand_n];
+    c = CamCandidate{};
+    std::memcpy(c.vp, vp, sizeof(c.vp));
+    c.proj = p;
+    c.weight = 1;
+    g_cand_cur = g_cand_n;
+    ++g_cand_n;
+}
+
+void attach_camera_block(const float* rows)
+{
+    // The camera-to-world block belongs to whichever view-projection was named
+    // most recently. They are usually written by the same call.
+    if (g_cand_cur < 0 || g_cand_cur >= g_cand_n) return;
+    CamCandidate& c = g_cand[g_cand_cur];
+    const float* row3 = rows + 3 * 4;
+    for (int r = 0; r < 3; ++r)
+        for (int k = 0; k < 3; ++k)
+            c.rows[r * 3 + k] = rows[r * 4 + k];
+    c.right[0] = c.rows[0]; c.right[1] = c.rows[1]; c.right[2] = c.rows[2];
+    c.eye[0] = row3[0]; c.eye[1] = row3[1]; c.eye[2] = row3[2];
+    c.have_cam = true;
+}
+
+// End of frame: promote the player's camera, or keep the last good one.
+void promote_player_camera(float aspect)
+{
+    g_cam_candidates_last = static_cast<unsigned>(g_cand_n);
+    if (g_cand_n > 0) {
+        drawpolicy::ProjParams cands[kMaxCamCandidates];
+        unsigned weights[kMaxCamCandidates];
+        for (int i = 0; i < g_cand_n; ++i) { cands[i] = g_cand[i].proj; weights[i] = g_cand[i].weight; }
+        const int win = drawpolicy::choose_player_camera(
+            cands, weights, g_cand_n, aspect,
+            g_prev_player_proj.perspective ? &g_prev_player_proj : nullptr);
+        if (win >= 0) {
+            const CamCandidate& c = g_cand[win];
+            std::memcpy(g_vp, c.vp, sizeof(g_vp));
+            g_have_vp = true;
+            if (c.have_cam) {
+                std::memcpy(g_cam_rows, c.rows, sizeof(g_cam_rows));
+                std::memcpy(g_cam_right, c.right, sizeof(g_cam_right));
+                std::memcpy(g_eye, c.eye, sizeof(g_eye));
+                g_have_eye = true;
+            }
+            g_prev_player_proj = c.proj;
+        } else {
+            // Nothing plausible this frame - hold what we had rather than
+            // adopting a pass we have already judged is not the player's.
+            ++g_cam_promote_failed;
+        }
+    }
+    g_cand_n = 0;
+    g_cand_cur = -1;
+}
 
 // FOV widening: scale the camera's x/y axes down inside the correction, so the
 // game renders a WIDER field into the same image. game_proj_tangents reports
@@ -863,21 +984,13 @@ bool transform(unsigned start_register, const float* data, unsigned vec4_count,
 
     note_shape(start_register, vec4_count);
 
-    // Keep VP and eye current regardless of probe state - the correction is
-    // built from them and they must track the game's real camera.
+    // Record this camera as a candidate. It is NOT adopted here: which of the
+    // frame's cameras is the player's is decided in promote_player_camera().
     if (covers(start_register, vec4_count, kViewProjBase)) {
-        std::memcpy(g_vp, data + (kViewProjBase - start_register) * 4, sizeof(g_vp));
-        g_have_vp = true;
+        note_camera_candidate(data + (kViewProjBase - start_register) * 4);
     }
     if (covers(start_register, vec4_count, kCamWorldBase)) {
-        const float* rows = data + (kCamWorldBase - start_register) * 4;
-        const float* row3 = rows + 3 * 4;
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                g_cam_rows[r * 3 + c] = rows[r * 4 + c];
-        g_cam_right[0] = g_cam_rows[0]; g_cam_right[1] = g_cam_rows[1]; g_cam_right[2] = g_cam_rows[2];
-        g_eye[0] = row3[0]; g_eye[1] = row3[1]; g_eye[2] = row3[2];
-        g_have_eye = true;
+        attach_camera_block(data + (kCamWorldBase - start_register) * 4);
     }
 
     if (!g_correct_on || !g_have_correction) return false;
@@ -1088,12 +1201,23 @@ bool game_camera_angles(float& yaw, float& pitch)
     // last reports a heading that has nothing to do with the player, and the aim
     // loop would turn the body to chase it. A player cannot rotate 90 degrees
     // between two Presents, so a jump that large is someone else's camera.
+    //
+    // It MUST be able to give up. s_last_yaw only advances on the accept path,
+    // so once a foreign camera takes the c189 slot its heading is compared
+    // against a stale player yaw forever and can never be accepted again. That
+    // is not hypothetical: it rejected 15472 of 15960 frames - 97 percent - and
+    // since controller_dir_now() and turn_body() both bail when this returns
+    // false, it killed the aim loop and threw away every snap turn the stick
+    // asked for. Same escape hatch as the world projection gate above.
     constexpr float kMaxYawJump = 90.0f * kPi / 180.0f;
-    if (s_have_last && std::fabs(aimpolicy::body_delta(y, s_last_yaw)) > kMaxYawJump) {
+    static unsigned s_reject_run = 0;
+    if (s_have_last && std::fabs(aimpolicy::body_delta(y, s_last_yaw)) > kMaxYawJump &&
+        ++s_reject_run < kCamYawRunToAccept) {
         ++g_cam_yaw_rejected;
         return false;
     }
 
+    s_reject_run = 0;
     yaw = y;
     s_last_yaw = y;
     s_have_last = true;
@@ -1236,6 +1360,17 @@ void on_present()
         g_angle_rad += dt * kDegPerSecond * kPi / 180.0f;
         if (g_angle_rad > 2.0f * kPi) g_angle_rad -= 2.0f * kPi;
     }
+    // Decide which of the frame's cameras was the player's, before anything
+    // reads g_vp or g_cam_rows. The aim loop (via vrinput::on_present) and
+    // rebuild_correction() both do, so this has to come first.
+    //
+    // Aspect is passed as 0 (test skipped) deliberately: the collapsed frustum
+    // that caused this is 0.1630/0.1223 = 1.333, the same 4:3 as the healthy
+    // 0.5536/0.4152, so an aspect test cannot separate them. The field-of-view
+    // range is what does the work. The parameter stays in the API for a pass
+    // that does differ in shape.
+    promote_player_camera(0.0f);
+
     // Controller input runs here: after the head deltas exist (it may move the
     // view reference) and before the correction is built from them.
     vrinput::on_present();
@@ -1667,7 +1802,8 @@ void status(FILE* f)
             g_fov_auto ? 1 : 0, g_fov_manual, g_fov_widen_x, g_fov_widen_y,
             g_world_proj.tan_half_h(), g_world_proj.tan_half_v(), g_world_proj.near_z(), g_world_proj.far_z(),
             2.0f * std::atan(g_world_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_world_proj.tan_half_v()) * 180.0f / kPi);
-    fprintf(f, "     world-proj-rejected=%u\n", g_world_proj_rejected);
+    fprintf(f, "     world-proj-rejected=%u cam-candidates=%u promote-failed=%u\n",
+            g_world_proj_rejected, g_cam_candidates_last, g_cam_promote_failed);
     fprintf(f, "weapon P: tan=%.4f/%.4f (deg %.1f x %.1f) near=%.3f\n",
             g_weapon_proj.tan_half_h(), g_weapon_proj.tan_half_v(),
             2.0f * std::atan(g_weapon_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_weapon_proj.tan_half_v()) * 180.0f / kPi,

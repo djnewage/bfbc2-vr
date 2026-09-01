@@ -377,6 +377,14 @@ The status line reads `turn-sign=UNKNOWN (probing)` rather than `(aim held off)`
 
 ## The auto FOV hunt collapsed the world frustum (2026-09-01)
 
+> **Correction, same day.** The headline of this section is **wrong**. The hunt did not cause the
+> collapse. A later launch with auto-location removed - `bfbc2vr.log` line 582 confirms the hunt
+> never started - showed the tangents fall `0.5536 -> 0.3608 -> 0.1630` anyway. The real cause is
+> below, under *"Whoever wrote c185 last"*. Everything this section says about the **consequences**
+> of a collapsed frustum still holds, and the guardrails it added are what turned the next failure
+> from an unusable black box into a merely wrong-scaled image. The hunt is still opt-in, which is
+> right on its own merits.
+
 Reported in-headset: **no gun visible at all**, the view **"a small black box instead of 3d"**, and
 shooting not following the barrel. The desktop window looked fine. All of it was one fault.
 
@@ -443,3 +451,59 @@ single-frame collapse of more than 2x is refused and the last believable value h
 the *rate*, not the value, so a genuine scope still comes through - and it gives up after 10
 consecutive refusals, because latching onto whichever projection was seen first is a worse failure
 than the one being guarded. `world-proj-rejected=` is in the status block.
+
+## "Whoever wrote c185 last" was never a camera (2026-09-01)
+
+Reported: **unable to snap or smooth turn**, and the view collapsing to a tiny letterboxed image
+while just walking around - confirmed **not** scoped. Two symptoms, one fault.
+
+`c185..c192` is one contiguous constant block holding **both** the view-projection (`c185..c188`)
+and the camera-to-world transform (`c189..c192`), and every pass that renders geometry writes it -
+shadow cascades, reflections, the main scene. The code latched both, unconditionally, at write time.
+When a foreign pass wrote last it took **both at once**:
+
+- `g_world_proj` collapsed to 18.5 degrees - the visible FOV bug, the black box, and the reason the
+  weapon stopped being classifiable (the classifier keys on the weapon field *differing* from the
+  world's, and 18.5 against 18.6 compares the same).
+- `g_cam_rows` took that camera's heading in the same instant.
+
+### The gate that could not let go
+
+`game_camera_angles()` refuses a heading that jumps more than 90 degrees between Presents, because a
+player cannot turn that fast and a jump that large is someone else's camera. But `s_last_yaw` only
+advanced on the **accept** path. Once a foreign camera took the slot, its heading was compared
+against a stale player yaw forever and could never be accepted again.
+
+It rejected **15472 of 15960 frames - 97 percent**. And both turning mechanisms bail when it returns
+false:
+
+- `controller_dir_now()` returns false -> `aim_error` reason 3 -> `no-controller=10601`, `emits=0`.
+  **Smooth turn dead.**
+- `turn_body()` returns false at the same call -> `no-camera=11`, `snaps=0`. **Snap turn dead.**
+
+The counters reconcile exactly: `6630 + 2319 + 7011 = 15960` frames, and
+`1 + 3037 + 10601 + 2 = 13641` aim-why events.
+
+**The input layer was never at fault.** `snap_turn_step` fired 11 times - the stick, the `armed`
+latch, the 0.80 threshold, the `|x| > |y|` test and the cooldown all behaved correctly, and every
+one of those turns was thrown away downstream. `melee clicks refused = 314` independently proves the
+stick delivers real deflection. Two rounds of input fixes were chasing a symptom.
+
+### What changed
+
+- **Every gate now has an escape.** A baseline that only advances on the accept path is the bug
+  pattern; `game_camera_angles` gets the same persist-and-accept hatch `g_world_proj` already had.
+- **The camera is chosen, not inherited.** Writes to `c185..c192` are collected as candidates for
+  the frame, each weighted by how many writes used it, and `promote_player_camera()` picks one at
+  end of frame - before anything reads it. Scoring is a pure function in `draw_policy.cpp`
+  (`camera_is_plausible`, `choose_player_camera`) so it is unit-tested like the rest of that file:
+  perspective only, field between 30 and 150 degrees, most-used candidate wins, and last frame's
+  camera breaks ties so a steady view does not alternate between passes. If nothing is plausible the
+  previous camera is held rather than a known-bad one adopted.
+- **An aspect test exists in the API but is passed 0.** It cannot separate this failure: the
+  collapsed frustum is `0.1630/0.1223 = 1.333`, the same 4:3 as the healthy `0.5536/0.4152`. The
+  field-of-view range is what does the work. A unit test pins that fact down so nobody re-adds it
+  believing it helps.
+
+`cam-candidates=` and `promote-failed=` are in the status block. `cam-yaw-rejected` near zero is the
+signal that this is healthy; ~97 percent of frames is what the failure looked like.

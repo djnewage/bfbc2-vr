@@ -59,6 +59,39 @@ void matrix_to_stored(const m4::Mat4 M, float stored[16]);
 // or when the three q estimates disagree (not of the assumed form).
 bool recover_projection(const m4::Mat4 M, ProjParams& out);
 
+// Could this projection be the PLAYER's view, as opposed to a shadow cascade,
+// a reflection, or some other pass that writes the same constant registers?
+//
+// The mod used to take whichever camera wrote c185..c192 last in a frame. When
+// a foreign pass won that race the world field collapsed (a measured 58.9 -> 18.5
+// degrees), which black-boxed the headset, made the weapon unclassifiable, and -
+// because the camera-to-world block travels with it - poisoned the heading the
+// aim loop steers by. This is the discriminator that replaces "last writer wins".
+//
+// `aspect` is the render target's width/height; pass <= 0 to skip that test.
+struct CameraPlausibility {
+    // Widest and narrowest total horizontal field we will believe as the
+    // player's. Excludes shadow cascades and the 18.5 degree pass; wide enough
+    // for the game's native ~59 degrees and for a widened field.
+    float min_fov_deg = 30.0f;
+    float max_fov_deg = 150.0f;
+    float aspect_tolerance = 0.08f;   // fractional
+};
+
+bool camera_is_plausible(const ProjParams& p, float aspect,
+                         const CameraPlausibility& th = CameraPlausibility{});
+
+// Pick the player's camera from the candidates seen during one frame. `weight`
+// is how many constant writes used each candidate - the main scene pass writes
+// far more often than an incidental one. `prev` (may be null) is the camera
+// accepted last frame; it breaks ties so a stable view stays stable rather than
+// flipping between two equally-weighted passes.
+//
+// Returns the index of the winner, or -1 when no candidate is plausible.
+int choose_player_camera(const ProjParams* cands, const unsigned* weight, int count,
+                         float aspect, const ProjParams* prev,
+                         const CameraPlausibility& th = CameraPlausibility{});
+
 void make_projection(const ProjParams& p, m4::Mat4 out);
 // P^-1 in closed form: [[1/a,0,0,0],[0,1/b,0,0],[0,0,0,1/t],[0,0,1,-q/t]].
 bool invert_projection(const ProjParams& p, m4::Mat4 out);

@@ -63,6 +63,52 @@ bool recover_projection(const Mat4 M, ProjParams& out)
     return true;
 }
 
+bool camera_is_plausible(const ProjParams& p, float aspect, const CameraPlausibility& th)
+{
+    // An orthographic or unrecoverable matrix is not a first-person camera.
+    // Shadow cascades are usually orthographic and already fail recovery.
+    if (!p.perspective) return false;
+
+    const float tan_h = p.tan_half_h(), tan_v = p.tan_half_v();
+    if (!std::isfinite(tan_h) || !std::isfinite(tan_v)) return false;
+    if (!(tan_h > 1e-4f) || !(tan_v > 1e-4f)) return false;
+
+    constexpr float kPiF = 3.14159265358979f;
+    const float fov_h = 2.0f * std::atan(tan_h) * 180.0f / kPiF;
+    if (fov_h < th.min_fov_deg || fov_h > th.max_fov_deg) return false;
+
+    // The player's view is rendered at the render target's shape. A pass with a
+    // different aspect is drawing into something else.
+    if (aspect > 0.0f) {
+        const float cand = tan_h / tan_v;
+        if (std::fabs(cand / aspect - 1.0f) > th.aspect_tolerance) return false;
+    }
+    return true;
+}
+
+int choose_player_camera(const ProjParams* cands, const unsigned* weight, int count,
+                         float aspect, const ProjParams* prev,
+                         const CameraPlausibility& th)
+{
+    if (!cands || !weight || count <= 0) return -1;
+    int best = -1;
+    for (int i = 0; i < count; ++i) {
+        if (!camera_is_plausible(cands[i], aspect, th)) continue;
+        if (best < 0) { best = i; continue; }
+        if (weight[i] > weight[best]) { best = i; continue; }
+        if (weight[i] < weight[best]) continue;
+
+        // Equal weight: keep whichever is closer to the camera accepted last
+        // frame, so a steady view does not alternate between two passes.
+        if (prev && prev->perspective) {
+            const float d_i = std::fabs(cands[i].tan_half_h() - prev->tan_half_h());
+            const float d_b = std::fabs(cands[best].tan_half_h() - prev->tan_half_h());
+            if (d_i < d_b) best = i;
+        }
+    }
+    return best;
+}
+
 void make_projection(const ProjParams& p, Mat4 out)
 {
     m4::identity(out);

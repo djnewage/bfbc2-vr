@@ -573,8 +573,78 @@ static void test_aim_deviation_near_pole()
     CHECK(std::fabs(y) * w < level);
 }
 
+// A perspective ProjParams with the given total horizontal field, at 4:3.
+static ProjParams cam_at(float fov_h_deg)
+{
+    const float deg = 3.14159265358979f / 180.0f;
+    const float tan_h = std::tan(0.5f * fov_h_deg * deg);
+    const float tan_v = tan_h / (4.0f / 3.0f);
+    ProjParams p;
+    p.a = 1.0f / tan_h;
+    p.b = 1.0f / tan_v;
+    p.q = 1.0001f;
+    p.t = -0.1f;
+    p.perspective = true;
+    return p;
+}
+
+static void test_camera_plausibility()
+{
+    // The exact failure that black-boxed the headset: the world frustum
+    // collapsed to 18.5 degrees and was adopted as the player's camera.
+    CHECK(!camera_is_plausible(cam_at(18.5f), 0.0f));
+    // The game's own field, and a widened one, must both be accepted.
+    CHECK(camera_is_plausible(cam_at(58.9f), 0.0f));
+    CHECK(camera_is_plausible(cam_at(109.4f), 0.0f));
+    // Orthographic / unrecoverable is never a first-person camera.
+    ProjParams ortho;              // perspective defaults to false
+    CHECK(!camera_is_plausible(ortho, 0.0f));
+
+    // The aspect test, when it is used at all.
+    CHECK(camera_is_plausible(cam_at(58.9f), 4.0f / 3.0f));
+    CHECK(!camera_is_plausible(cam_at(58.9f), 16.0f / 9.0f));
+    // ...and the reason it is passed 0 in the real code: the collapsed frustum
+    // has the SAME 4:3 shape as the healthy one, so aspect cannot separate them.
+    CHECK(!camera_is_plausible(cam_at(18.5f), 4.0f / 3.0f));
+}
+
+static void test_choose_player_camera()
+{
+    // A plausible camera wins over an implausible one even with less weight.
+    {
+        const ProjParams c[2] = { cam_at(18.5f), cam_at(58.9f) };
+        const unsigned w[2] = { 900, 3 };
+        CHECK(choose_player_camera(c, w, 2, 0.0f, nullptr) == 1);
+    }
+    // Among plausible candidates, the most-used one wins.
+    {
+        const ProjParams c[2] = { cam_at(58.9f), cam_at(90.0f) };
+        const unsigned w[2] = { 10, 400 };
+        CHECK(choose_player_camera(c, w, 2, 0.0f, nullptr) == 1);
+    }
+    // Equal weight: the one nearer last frame's camera breaks the tie, so a
+    // steady view does not alternate between two passes.
+    {
+        const ProjParams c[2] = { cam_at(58.9f), cam_at(120.0f) };
+        const unsigned w[2] = { 50, 50 };
+        const ProjParams prev = cam_at(119.0f);
+        CHECK(choose_player_camera(c, w, 2, 0.0f, &prev) == 1);
+        const ProjParams prev2 = cam_at(60.0f);
+        CHECK(choose_player_camera(c, w, 2, 0.0f, &prev2) == 0);
+    }
+    // No plausible candidate at all -> refuse, so the caller holds what it had.
+    {
+        const ProjParams c[2] = { cam_at(18.5f), cam_at(5.0f) };
+        const unsigned w[2] = { 900, 900 };
+        CHECK(choose_player_camera(c, w, 2, 0.0f, nullptr) == -1);
+    }
+    CHECK(choose_player_camera(nullptr, nullptr, 0, 0.0f, nullptr) == -1);
+}
+
 int main()
 {
+    test_camera_plausibility();
+    test_choose_player_camera();
     test_aim_deviation();
     test_aim_deviation_near_pole();
     test_head_orientation();
