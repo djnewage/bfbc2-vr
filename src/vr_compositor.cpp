@@ -21,10 +21,20 @@ ID3D9VkInteropDevice* g_interop_dev = nullptr;
 // One texture per eye for alternate-eye rendering: each frame refreshes the
 // eye the game just rendered; the other eye re-submits last frame's image.
 // Widest UV span we will submit. 1.0 is "the headset sees exactly what the game
-// renders"; above that the headset sees wider and the extra is black border,
-// which is normal and fine in moderation. 2.0 means half the panel is border -
-// past that something is wrong with the game's projection, not with the fit.
-constexpr float kMaxBoundsSpan = 2.0f;
+// renders"; above that the headset sees wider and the surplus is black border.
+//
+// A border is NORMAL and must not be refused: it is the honest way to show a
+// narrow game in a wide headset, and it keeps the angular scale correct. The
+// alternative - dropping the bounds and letting the frame stretch to fill the
+// panel - puts everything at the wrong apparent size, which breaks the
+// correspondence the aim loop depends on. So this threshold only has to
+// separate "narrow" from "collapsed". On an Index, vertically:
+//
+//   native 45 deg game FOV (tgv 0.4152)  -> span ~3.0   legitimate, must pass
+//   collapsed by a bad hunt (tgv 0.1223) -> span ~10.3  the black box
+//
+// 5.0 sits between them with room on both sides.
+constexpr float kMaxBoundsSpan = 5.0f;
 unsigned g_bounds_refused = 0;
 
 IDirect3DTexture9*     g_eye_tex[2]     = {};
