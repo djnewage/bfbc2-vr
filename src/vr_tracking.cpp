@@ -50,10 +50,23 @@ void store_controller(int hand, const vr::TrackedDevicePose_t& p)
     g_ctl_valid[hand] = true;
 }
 
-// Which axis carries the thumbstick and which bit is its click, per device.
-// Index/Knuckles put the joystick on axis 3 / button 35 and the TRACKPAD on
-// axis 0 / button 32; everything else uses axis 0 / button 32 for the stick.
-// Getting this wrong is what made a resting thumb read as a deliberate click.
+// Legacy input puts the primary 2D control on axis 0 and its click on bit 32
+// for EVERY controller type. That is the whole contract legacy bindings exist
+// to uphold, and SteamVR's own knuckles map says so directly:
+//
+//   drivers/indexcontroller/resources/input/legacy_bindings_index_controller.json
+//     { "mode": "joystick", "path": "/user/hand/right/input/thumbstick",
+//       "inputs": { "position": { "output": ".../right_axis0_value" },
+//                   "click":    { "output": ".../right_axis0_press" } } }
+//
+// This code briefly read axis 3 / bit 35 for Index, reasoning from
+// k_EButton_IndexController_JoyStick in openvr.h. Those constants describe the
+// MODERN input system's device layout; legacy emulation deliberately collapses
+// the stick back onto axis 0. Reading axis 3 meant the stick read a flat zero
+// forever - no turning at all - because SteamVR never populates it in this mode.
+//
+// The device type is still worth capturing: it is in the log, and the same
+// binding file explains the phantom clicks (see kStickClickBit below).
 char g_ctl_type[2][64] = {};
 int  g_stick_axis[2] = { 0, 0 };
 unsigned long long g_stick_click[2] = { 1ull << 32, 1ull << 32 };
@@ -66,12 +79,10 @@ void identify_controller(int hand, vr::TrackedDeviceIndex_t idx)
     if (!type[0] || std::strcmp(type, g_ctl_type[hand]) == 0) return;   // unchanged
 
     std::strncpy(g_ctl_type[hand], type, sizeof(g_ctl_type[hand]) - 1);
-    const bool index = std::strstr(type, "knuckles") != nullptr ||
-                       std::strstr(type, "index") != nullptr;
-    g_stick_axis[hand]  = index ? 3 : 0;
-    g_stick_click[hand] = index ? (1ull << 35) : (1ull << 32);
-    VRLOG("[input] %s controller is '%s' - stick on axis %d, click bit %d",
-          hand ? "right" : "left", type, g_stick_axis[hand], index ? 35 : 32);
+    g_stick_axis[hand]  = 0;
+    g_stick_click[hand] = 1ull << 32;
+    VRLOG("[input] %s controller is '%s' - legacy stick on axis %d, click bit 32",
+          hand ? "right" : "left", type, g_stick_axis[hand]);
 }
 
 void refresh_controllers(const vr::TrackedDevicePose_t* poses, unsigned count)

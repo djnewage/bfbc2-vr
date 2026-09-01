@@ -206,19 +206,54 @@ Two reports: *"when I use the right thumbstick it throws a grenade"* — on push
 without clicking — and *"when I aim up I snap turn left and right and the screen shakes"*, as
 **discrete ~30° jumps**, i.e. real snap turns firing repeatedly.
 
-### The stick was never on the axis we were reading
+### Deflecting the stick asserts the stick-click bit
 
-`thirdparty/openvr/openvr.h` defines `k_EButton_SteamVR_Touchpad = k_EButton_Axis0` (32) but
-`k_EButton_IndexController_JoyStick = k_EButton_Axis3` (35). The code read `rAxis[0]` as the stick
-and tested bit 32 as its click; **`rAxis[3]` and bit 35 were never read anywhere**. On Index that
-means bit 32 is the **trackpad**, which a thumb resting on or sliding across asserts with no
-intent — so nudging the stick sideways sent the melee key every time.
+SteamVR's own legacy binding for the Index — `drivers/indexcontroller/resources/input/`
+`legacy_bindings_index_controller.json` — maps the thumbstick **twice**. Once as a joystick:
 
-`vr_tracking.h` had stated the assumption as fact ("stick is axis 0 ... on both Index and
-Touch-style controllers"); the bundled header contradicts it. The axis and click bit are now chosen
-per device from `Prop_ControllerType_String`, and **every raw axis and the raw button mask are
-printed in the status file** so the choice is checkable rather than assumed. Wiggle one control at
-a time and read off which numbers move.
+```json
+{ "mode": "joystick", "path": "/user/hand/right/input/thumbstick",
+  "inputs": { "position": { "output": ".../right_axis0_value" },
+              "click":    { "output": ".../right_axis0_press" } } }
+```
+
+and again as a threshold button on the *same* output:
+
+```json
+{ "mode": "button", "type": "boolean_threshold",
+  "path": "/user/hand/right/input/thumbstick",
+  "inputs": { "click": { "output": ".../right_axis0_press" } },
+  "parameters": { "force_input": "position",
+                  "click_activate_threshold": 0.8, "click_deactivate_threshold": 0.7 } }
+```
+
+So **pushing the stick past 0.8 in any direction sets bit 32** — the same bit read as "stick
+click". That is the grenade: sideways, no click. The trackpad shares that bit too, but it is the
+threshold rule that matches the report.
+
+The fix is to require the stick near centre (`|stick| < 0.4`) before a click counts. The 0.8/0.7
+hysteresis above is what makes `0.4` a derived threshold rather than a guessed one.
+
+#### A wrong turn taken first (2026-09-01)
+
+This was initially diagnosed from `thirdparty/openvr/openvr.h`, which defines
+`k_EButton_IndexController_JoyStick = k_EButton_Axis3` (35) against
+`k_EButton_SteamVR_Touchpad = k_EButton_Axis0` (32), and the reader was switched to `rAxis[3]` /
+bit 35 for Index. **That was wrong and it broke the stick completely.** Those constants describe
+the *modern* input system's device layout; legacy emulation deliberately collapses the thumbstick
+back onto axis 0, which is the entire purpose of a legacy binding. SteamVR never populates
+`rAxis[3]` in this mode, so the stick read a flat zero, no snap turn ever fired, and — because the
+aim loop was at that point gated on a snap turn having resolved the mouse sign — **turning stopped
+working altogether**.
+
+The evidence that settled it: with the game in the foreground and the loop being serviced at 120
+frames/second, all five axes on both hands read `+0.00` across a 45-second capture, including
+`axis1` (trigger) and `axis2` (grip) while they were being pressed.
+
+Legacy input puts the primary 2D control on **axis 0, click bit 32, for every controller type**;
+the per-device branch was the wrong shape as well as the wrong value, and is gone. The device type
+is still read and logged, and **every raw axis and the raw button mask are printed in the status
+file**, which is what made the mistake visible.
 
 ### Two paths re-armed the snap latch with the stick untouched
 
@@ -312,3 +347,30 @@ command, while `input left` flipped `g_swap_hands`. Since `update_aim`'s hand pa
 reaches the error computation — `controller_dir_now` always reads `g_grip_hand` — the swapped
 configuration dedup'd and gated on one controller while measuring the other. `input left|right`
 now moves the weapon hand with it, and invalidates both calibrations when it does.
+
+## The aim loop deadlocked waiting for a snap turn (2026-09-01)
+
+The mouse-dx sign — which way a positive `dx` actually turns the body — has to be a measured fact,
+because a wrong guess drives the body *away* from the target: positive feedback, not a wobble. The
+loop was therefore gated on `g_turn_sign_known`, which only `settle_turn()` sets, and which only
+runs when a turn is pending, and the only thing that requested a turn was a **snap turn**.
+
+Snap turn needs the stick. While the stick was misread (above), the sign was never resolved, so the
+aim loop declined *every frame for an entire session*:
+
+```
+[aim] enabled=1 emits=0 err=+0.0 deg | buttons(l=1 r=1) fg=1 dinput=1 hook=1 |
+      disabled=1 stale-sample=1782 turn-sign-unknown=12240
+```
+
+`turn-sign-unknown` climbing by 600 per log line, `emits=0`. Two independent bugs, but the gate is
+what turned a broken stick into *no turning at all* — a dependency on a user action that could
+itself be broken is a deadlock, however well-founded the caution behind it.
+
+The sign is now resolved by the aim loop's own motion: when it is unknown and there is a real error
+to act on, the loop emits one bounded 3° probe through the same `turn_body()` path a snap turn uses,
+and `settle_turn()` reads the answer off the camera — no second observer. A wrong guess costs one
+3° nudge the wrong way, once. The probe is deliberately not view-compensated: it is a real body
+turn, so the view moves with it. One small jolt at startup is the honest price of not guessing.
+
+The status line reads `turn-sign=UNKNOWN (probing)` rather than `(aim held off)`.

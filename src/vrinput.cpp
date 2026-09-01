@@ -74,6 +74,10 @@ struct PendingTurn {
 };
 PendingTurn g_pending;
 constexpr int kTurnSettleFrames = 8;
+// How far the aim loop turns the body when it is probing for the mouse-dx sign.
+// Small enough that a wrong guess is a nudge rather than a lurch, large enough
+// to clear the game's mouse smoothing and be unambiguous on the camera.
+constexpr float kSignProbeRadians = 3.0f * 3.14159265358979f / 180.0f;
 float g_last_measured_ratio = 0.0f;
 
 // ---------------------------------------------------------------------------
@@ -190,6 +194,19 @@ ActionKey g_keys[] = {
     { "crouch", inputbus::kCtrl,  VK_LCONTROL },
     { "sprint", inputbus::kShift, VK_LSHIFT },
 };
+// A printable stand-in for keys that have no glyph. The status dump used to
+// cast the VK straight to char, so jump/crouch/sprint rendered as a blank and
+// two mojibake bytes - in the one diagnostic used to check the bindings.
+char key_label(WORD vk)
+{
+    switch (vk) {
+        case VK_SPACE:    return '_';
+        case VK_LCONTROL: return '^';
+        case VK_LSHIFT:   return '+';
+        default:          return static_cast<char>(vk);
+    }
+}
+
 ActionKey* find_action(const char* name)
 {
     for (ActionKey& a : g_keys) if (_stricmp(a.name, name) == 0) return &a;
@@ -341,11 +358,6 @@ void update_aim(int hand)
     // correction end up chasing each other.
     if (g_pending.active) { ++g_aim_why[kAimTurnSettling]; return; }
 
-    // Until a snap turn has resolved which way a positive dx actually turns the
-    // body, the sign is a guess - and a wrong guess drives the body AWAY from
-    // the target, which is positive feedback, not a wobble. Wait for the fact.
-    if (!g_turn_sign_known) { ++g_aim_why[kAimSignUnknown]; return; }
-
     // Retire in-flight yaw against what the camera has actually done since the
     // last sample. Anything the player's own mouse contributes retires it too,
     // which is correct: the error is measured from the camera, so any rotation
@@ -411,6 +423,29 @@ void update_aim(int hand)
         if (std::fabs(g_aim_inflight) > g_aim_deadzone) ++g_aim_inflight_held;
         else ++g_aim_why[kAimDeadzone];
         camover::bleed_turn_offset();   // idle: let view and body re-converge
+        return;
+    }
+
+    // Which way a positive mouse dx actually turns the body has to be a
+    // measured fact: a wrong guess drives the body AWAY from the target, which
+    // is positive feedback rather than a wobble.
+    //
+    // This used to refuse to run until a SNAP TURN resolved it, which is a
+    // deadlock - snap turn needs the stick, and while the stick was misread the
+    // sign was never resolved, so the loop declined every single frame for a
+    // whole session (turn-sign-unknown climbing past 12000, emits=0, and no
+    // turning at all). Resolve it from the aim loop's own motion instead: emit
+    // one small bounded probe through the same path a snap turn uses and let
+    // settle_turn() read the answer off the camera. A wrong guess costs one
+    // 3-degree nudge the wrong way, once, and is correct forever after.
+    //
+    // The probe is deliberately NOT view-compensated: it is a real body turn
+    // toward (or briefly away from) the target, so the view moves those 3
+    // degrees with it. One small jolt at startup is the honest price of not
+    // guessing.
+    if (!g_turn_sign_known) {
+        ++g_aim_why[kAimSignUnknown];
+        turn_body((err_yaw > 0.0f ? 1.0f : -1.0f) * kSignProbeRadians);
         return;
     }
 
@@ -642,9 +677,8 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         if (!b1[0]) {
             int used = _snprintf_s(reply, n, _TRUNCATE, "keys:");
             for (const ActionKey& a : g_keys)
-                used += _snprintf_s(reply + used, n - used, _TRUNCATE, " %s=%c", a.name,
-                                    a.vk == VK_SPACE ? '_' : (a.vk == VK_LCONTROL ? '^' :
-                                    (a.vk == VK_LSHIFT ? '+' : static_cast<char>(a.vk))));
+                used += _snprintf_s(reply + used, n - used, _TRUNCATE,
+                                    " %s=%c", a.name, key_label(a.vk));
             return true;
         }
         ActionKey* a = find_action(b1);
@@ -832,12 +866,12 @@ void status(FILE* f)
         int used = _snprintf_s(g_status_keys, sizeof(g_status_keys), _TRUNCATE, "  keys:");
         for (const ActionKey& a : g_keys)
             used += _snprintf_s(g_status_keys + used, sizeof(g_status_keys) - used, _TRUNCATE,
-                                " %s=%c", a.name, static_cast<char>(a.vk));
+                                " %s=%c", a.name, key_label(a.vk));
         fprintf(f, "%s\n", g_status_keys);
     }
     fprintf(f, "  melee clicks refused (stick not centred)=%u  waiting-on-in-flight=%u  turn-sign=%s\n",
             g_melee_suppressed, g_aim_inflight_held,
-            g_turn_sign_known ? (g_turn_sign > 0 ? "+1" : "-1") : "UNKNOWN (aim held off)");
+            g_turn_sign_known ? (g_turn_sign > 0 ? "+1" : "-1") : "UNKNOWN (probing)");
     fprintf(f, "  gate: disabled=%u not-foreground=%u no-controllers=%u | turn: busy=%u no-camera=%u no-response=%u measured=%u\n",
             g_gate_disabled, g_gate_not_foreground, g_gate_no_controllers,
             g_turn_busy, g_turn_no_camera, g_turn_no_response, g_turn_measured);
