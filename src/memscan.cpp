@@ -233,6 +233,9 @@ enum class VmFovMode { Off, Fixed, Follow };
 VmFovMode g_vmfov_mode = VmFovMode::Off;      // follow did NOT fix the arms and loses the push; opt-in via vmfov
 float    g_vmfov_fixed_deg = 60.0f;
 unsigned g_vmfovfind_attempts = 0;
+bool     g_fovfind_hinted = false;   // the "run fovfind yourself" note is once per launch
+unsigned g_restore_failed = 0;       // pokes we could not put back - corruption we caused
+unsigned g_wrong_direction = 0;      // candidates that narrowed the view instead of widening it
 bool     g_hunt_weapon = false;     // hunt verification signal: weapon tangents instead of world
 
 bool hunt_tangents(float& th, float& tv)
@@ -326,6 +329,8 @@ void hunt_begin(float factor, bool deg_v_only = false)
     g_hunt_sets.clear();
     g_hunt.clear();
     g_hits.clear();
+    g_restore_failed = 0;
+    g_wrong_direction = 0;
     const float deg_h = 2.0f * std::atan(th) * 180.0f / kPi, deg_v = 2.0f * std::atan(tv) * 180.0f / kPi;
     const float rad_h = deg_h * kPi / 180.0f, rad_v = deg_v * kPi / 180.0f;
     if (deg_v_only) {
@@ -513,7 +518,13 @@ void hunt_tick()
     if (g_hunt_phase < 0) return;
     if (g_hunt_i >= g_hunt.size()) {
         g_hunt_phase = -1;
-        VRLOG("[hunt] DONE: %zu hits of %zu candidates over %u frames", g_hits.size(), g_hunt.size(), g_hunt_frames_total);
+        VRLOG("[hunt] DONE: %zu hits of %zu candidates over %u frames "
+              "(%u rejected for narrowing, %u restores FAILED)",
+              g_hits.size(), g_hunt.size(), g_hunt_frames_total, g_wrong_direction, g_restore_failed);
+        if (g_restore_failed) {
+            VRLOG("[hunt] WARNING: %u pokes could not be restored - the projection may be wrong. "
+                  "Run 'fov restore', or restart the game.", g_restore_failed);
+        }
         for (const HuntHit& h : g_hits) {
             VRLOG("[hunt]  HIT %p (%s) set=%s orig=%.4f  tangents %.4f/%.4f -> %.4f/%.4f",
                   h.addr, where(h.addr), g_hunt_sets[h.set].name, h.original, h.th_before, h.tv_before, h.th_after, h.tv_after);
@@ -565,8 +576,39 @@ void hunt_tick()
     float th, tv;
     const bool have = hunt_tangents(th, tv);
     write_float(c.addr, c.original);
-    if (have && g_base_th > 0.0f &&
-        (std::fabs(th / g_base_th - 1.0f) > 0.05f || std::fabs(tv / g_base_tv - 1.0f) > 0.05f)) {
+
+    // Verify the restore actually took. A hunt that cannot put back what it
+    // poked silently corrupts the game: the world frustum ends up wrong, the
+    // headset view black-boxes, and nothing says why. Count and name them.
+    {
+        float back = 0.0f;
+        if (!read_float(c.addr, back) ||
+            std::fabs(back - c.original) > std::fabs(c.original) * 0.01f + 1e-5f) {
+            ++g_restore_failed;
+            if (g_restore_failed <= 10) {
+                VRLOG("[hunt] RESTORE FAILED %p (%s) set=%s: wanted %.4f, reads %.4f",
+                      c.addr, where(c.addr), g_hunt_sets[c.set].name, c.original, back);
+            }
+        }
+    }
+
+    const bool moved = have && g_base_th > 0.0f &&
+        (std::fabs(th / g_base_th - 1.0f) > 0.05f || std::fabs(tv / g_base_tv - 1.0f) > 0.05f);
+    // Every encoding in kEnc is built so that a correct address WIDENS the
+    // field: deg/rad/tan are poked x1.3, and proj_a/proj_b hold 1/tan so they
+    // are poked x(1/1.3). So the tangent must go UP. A candidate that narrows
+    // it is not the FOV - it is some other float that perturbs the projection -
+    // and accepting it is how the world collapsed from 124 to 18.5 degrees.
+    const bool wider = moved && th > g_base_th && tv > g_base_tv;
+    if (moved && !wider) {
+        ++g_wrong_direction;
+        if (g_wrong_direction <= 10) {
+            VRLOG("[hunt] rejected %p (%s) set=%s orig=%.4f: NARROWS the view %.4f/%.4f -> %.4f/%.4f",
+                  c.addr, where(c.addr), g_hunt_sets[c.set].name, c.original,
+                  g_base_th, g_base_tv, th, tv);
+        }
+    }
+    if (wider) {
         g_hits.push_back({ c.addr, c.original, c.set, g_base_th, g_base_tv, th, tv });
         VRLOG("[hunt] HIT %p (%s) set=%s orig=%.4f: tangents %.4f/%.4f -> %.4f/%.4f",
               c.addr, where(c.addr), g_hunt_sets[c.set].name, c.original, g_base_th, g_base_tv, th, tv);
@@ -720,6 +762,33 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
             return true;
         }
         if (!_stricmp(a1, "auto")) g_fov_mode = FovMode::Auto;
+        else if (!_stricmp(a1, "restore")) {
+            // Put back EVERY address a hunt has touched, not just the one that
+            // was selected. `fov off` restores only g_fov_addr, which is no use
+            // when the damage was done by candidates that were poked, recorded
+            // and rejected - which is exactly the case that black-boxed the
+            // view. Verified, because an unverified restore is what got us here.
+            g_fov_mode = FovMode::Off;
+            unsigned tried = 0, failed = 0;
+            auto put_back = [&](float* addr, float orig) {
+                if (!addr) return;
+                ++tried;
+                write_float(addr, orig);
+                float back = 0.0f;
+                if (!read_float(addr, back) ||
+                    std::fabs(back - orig) > std::fabs(orig) * 0.01f + 1e-5f) ++failed;
+            };
+            for (const HuntHit& h : g_hits)   put_back(h.addr, h.original);
+            for (const HuntCand& c : g_hunt)  put_back(c.addr, c.original);
+            put_back(g_fov_addr, g_fov_original);
+            put_back(g_vmfov_addr, g_vmfov_original);
+            g_locks.clear();
+            VRLOG("[fov] restore: %u addresses put back, %u would not take", tried, failed);
+            _snprintf_s(reply, n, _TRUNCATE,
+                        "fov restore: %u put back, %u failed%s", tried, failed,
+                        failed ? " - restart the game to be sure" : "");
+            return true;
+        }
         else if (!_stricmp(a1, "off")) {
             g_fov_mode = FovMode::Off;
             if (g_fov_addr) write_float(g_fov_addr, g_fov_original);
@@ -808,27 +877,33 @@ void on_present()
     hunt_tick();
     for (const Lock& l : g_locks) write_float(l.addr, l.value);
 
-    // Engine FOV: locate once (no input needed), then hold every frame.
+    // Engine FOV: hold it once an address is known. Locating it is NOT automatic.
+    //
+    // This used to start a hunt by itself ~10 s after the view stabilised, and
+    // retry up to three times. A hunt pokes thousands of heap floats and puts
+    // each back; when a restore does not take, the world frustum is left wrong,
+    // and nothing tells the player. One launch it found two candidates that
+    // happened to cancel; the next it found four that cascaded:
+    //
+    //   HIT 10152BC4 orig=45.0994: tangents 0.5536/0.4152 -> 0.4349/0.3262
+    //   HIT 1027CD48 orig=45.0814: tangents 0.4158/0.3118 -> 0.3405/0.2554
+    //   HIT 1027E164 orig=45.0813: tangents 0.3238/0.2429 -> 0.2513/0.1885
+    //   HIT 102DAAD8 orig=45.1000: tangents 0.2332/0.1749 -> 0.1630/0.1223
+    //
+    // leaving the world at 18.5 x 13.9 degrees instead of 124 x 109. That
+    // collapse alone black-boxed the headset view (the eye bounds sample far
+    // outside the texture), hid the gun, and killed the viewmodel classifier,
+    // which keys on the weapon FOV differing from the world's. Unsupervised
+    // memory writes with no verification are not worth that. Run `fovfind`
+    // (or `fovhunt`) from the console when you want it.
     float th, tv;
     const bool have_world = camover::world_tangents(th, tv);
     g_fov_stable_frames = have_world ? g_fov_stable_frames + 1 : 0;
-    if (!g_fov_addr && g_fov_mode != FovMode::Off && g_hunt_phase < 0 && g_h2_phase < 0 &&
-        g_fov_stable_frames > 600 && g_fovfind_attempts < 3 && (g_fov_stable_frames % 1800) == 601) {
-        VRLOG("[fovfind] auto-locating the engine FOV (attempt %u)...", g_fovfind_attempts + 1);
-        g_fovfind_pending = true;
-        ++g_fovfind_attempts;
-        hunt_begin(1.3f, true);
-    }
-    // Weapon FOV: locate after the camera FOV is known, then hold (follow/fixed).
-    float wth, wtv;
-    const bool have_weapon = camover::weapon_tangents(wth, wtv);
-    if (g_fov_addr && !g_vmfov_addr && g_vmfov_mode != VmFovMode::Off && have_weapon &&
-        g_hunt_phase < 0 && g_h2_phase < 0 && g_vmfovfind_attempts < 2 && (g_fov_stable_frames % 900) == 450) {
-        VRLOG("[fovfind] auto-locating the WEAPON FOV (attempt %u)...", g_vmfovfind_attempts + 1);
-        g_hunt_weapon = true;
-        g_fovfind_pending = true;
-        ++g_vmfovfind_attempts;
-        hunt_begin(1.3f, true);
+    if (!g_fov_addr && g_fov_mode != FovMode::Off && have_world && !g_fovfind_hinted &&
+        g_fov_stable_frames > 600) {
+        g_fovfind_hinted = true;
+        VRLOG("[fovfind] engine FOV not located; widening is OFF. Run 'fovfind' to locate it, "
+              "'fov restore' to undo a hunt. Auto-location is deliberately disabled.");
     }
     if (g_vmfov_addr && g_vmfov_mode != VmFovMode::Off && g_hunt_phase < 0) {
         float target = g_vmfov_fixed_deg;

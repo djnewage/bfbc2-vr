@@ -20,6 +20,13 @@ ID3D9VkInteropDevice* g_interop_dev = nullptr;
 
 // One texture per eye for alternate-eye rendering: each frame refreshes the
 // eye the game just rendered; the other eye re-submits last frame's image.
+// Widest UV span we will submit. 1.0 is "the headset sees exactly what the game
+// renders"; above that the headset sees wider and the extra is black border,
+// which is normal and fine in moderation. 2.0 means half the panel is border -
+// past that something is wrong with the game's projection, not with the fit.
+constexpr float kMaxBoundsSpan = 2.0f;
+unsigned g_bounds_refused = 0;
+
 IDirect3DTexture9*     g_eye_tex[2]     = {};
 ID3D9VkInteropTexture* g_eye_interop[2] = {};
 
@@ -478,7 +485,7 @@ bool submit_frame()
     vr::VRTextureBounds_t bounds[2] = { { 0, 0, 1, 1 }, { 0, 0, 1, 1 } };
     bool have_bounds = false;
     float tgh = 0.0f, tgv = 0.0f;
-    if (vrtrack::system() && camover::game_proj_tangents(tgh, tgv)) {
+    if (vrtrack::system() && camover::game_proj_tangents(tgh, tgv) && tgh > 1e-4f && tgv > 1e-4f) {
         for (int e = 0; e < 2; ++e) {
             float l, r, t, b;
             vrtrack::system()->GetProjectionRaw(e == 0 ? vr::Eye_Left : vr::Eye_Right, &l, &r, &t, &b);
@@ -488,6 +495,33 @@ bool submit_frame()
             bounds[e].vMax = (b + tgv) / (2.0f * tgv);
         }
         have_bounds = true;
+
+        // Refuse bounds that would shrink the frame into a corner of the panel.
+        // The UV span is the headset's field measured in units of the game's, so
+        // a game frustum far NARROWER than the headset's makes it explode: with
+        // the world collapsed to tan 0.163 (18.5 deg) the span reached about 8,
+        // putting roughly an eighth of the panel width on screen and black
+        // everywhere else. That is a real failure that reached a player as
+        // "the view in the headset is a small black box instead of 3d".
+        //
+        // A wrong FOV should cost the wrong scale, never the whole image, so
+        // fall back to the full texture and say so. This does not fix the FOV -
+        // it stops a bad one from being unusable while it is diagnosed.
+        for (int e = 0; e < 2 && have_bounds; ++e) {
+            const float du = bounds[e].uMax - bounds[e].uMin;
+            const float dv = bounds[e].vMax - bounds[e].vMin;
+            if (!(du > 0.0f) || !(dv > 0.0f) || du > kMaxBoundsSpan || dv > kMaxBoundsSpan) {
+                have_bounds = false;
+                ++g_bounds_refused;
+                if (g_bounds_refused == 1 || (g_bounds_refused % 600) == 0) {
+                    VRLOG("[comp] bounds refused (%u): game tangents %.4f/%.4f give span %.2fx%.2f "
+                          "- submitting the full frame instead. The game FOV is wrong; "
+                          "try 'fov restore' or restart.", g_bounds_refused, tgh, tgv, du, dv);
+                }
+                bounds[0] = { 0, 0, 1, 1 };
+                bounds[1] = { 0, 0, 1, 1 };
+            }
+        }
         static bool logged = false;
         if (!logged) {
             logged = true;
@@ -671,8 +705,9 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
 
 void status(FILE* f)
 {
-    fprintf(f, "compositor: scene=%d interop=%d enabled=%d backbuffer=%ux%u submits=%u\n",
-            g_scene_ok ? 1 : 0, g_interop_ok ? 1 : 0, g_enabled ? 1 : 0, g_width, g_height, g_submits);
+    fprintf(f, "compositor: scene=%d interop=%d enabled=%d backbuffer=%ux%u submits=%u bounds-refused=%u\n",
+            g_scene_ok ? 1 : 0, g_interop_ok ? 1 : 0, g_enabled ? 1 : 0, g_width, g_height,
+            g_submits, g_bounds_refused);
     fprintf(f, "hud: %s %s dist=%.2f width=%.2f height=%.2f alpha=%.2f additive=%d draws/frame=%u submits=%u%s\n",
             g_hud_enabled ? "on" : "off", g_hud_head_locked ? "head" : "body", g_hud_dist, g_hud_width,
             g_hud_height, g_hud_alpha, g_hud_alpha_additive ? 1 : 0, g_hud_draws_last, g_hud_submits, g_hud_failed ? " FAILED" : "");

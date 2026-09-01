@@ -374,3 +374,72 @@ and `settle_turn()` reads the answer off the camera — no second observer. A wr
 turn, so the view moves with it. One small jolt at startup is the honest price of not guessing.
 
 The status line reads `turn-sign=UNKNOWN (probing)` rather than `(aim held off)`.
+
+## The auto FOV hunt collapsed the world frustum (2026-09-01)
+
+Reported in-headset: **no gun visible at all**, the view **"a small black box instead of 3d"**, and
+shooting not following the barrel. The desktop window looked fine. All of it was one fault.
+
+`bfbc2vr.log`, the bad run - four hits, each measured against a baseline that had already shrunk:
+
+```
+HIT 10152BC4  orig=45.0994:  tangents 0.5536/0.4152 -> 0.4349/0.3262
+HIT 1027CD48  orig=45.0814:  tangents 0.4158/0.3118 -> 0.3405/0.2554
+HIT 1027E164  orig=45.0813:  tangents 0.3238/0.2429 -> 0.2513/0.1885
+HIT 102DAAD8  orig=45.1000:  tangents 0.2332/0.1749 -> 0.1630/0.1223
+```
+
+The launch before found only two and they happened to cancel (`0.5536 -> 0.7487 -> 0.5536`), which
+is why this worked earlier the same session. It is nondeterministic.
+
+```
+healthy:  world tan=1.8842/1.4131  (deg 124.1 x 109.4)   VIEWMODEL writes=11  hidden=3/1
+broken:   world tan=0.1630/0.1223  (deg  18.5 x  13.9)   VIEWMODEL writes=0   hidden=0/1
+```
+
+### One wrong tangent, four symptoms
+
+- **The black box.** `VRTextureBounds_t` maps frustum tangents onto UVs as `u = (l + tg) / (2*tg)`,
+  with `l,r,t,b` from `GetProjectionRaw`. The span is the headset's field measured *in units of the
+  game's*, so a game frustum far narrower than the headset's makes it explode: at `tg = 0.163` the
+  span reached about 8, putting roughly an eighth of the panel width on screen and black everywhere
+  else. At the healthy `1.8842` it is a sane `u = [0.13, 0.87]`.
+- **No gun.** At that crop the weapon, which sits low in frame, is outside the visible box.
+- **The gun ignored the controller.** `classify()` keys on the weapon's projection *differing* from
+  the world's; the near planes match, so `DepthDiffers` is false and `own_fov` is the whole test.
+  World 18.5 deg against weapon 18.6 deg compares `Same`, so it fell back to the +/-0.6 m distance
+  test that almost nothing passes - hence `VIEWMODEL writes=0`, no grip transform, and no arms-hide
+  either, since that requires `cls == Viewmodel`.
+- **"Instead of 3d."** At an eighth of the panel the stereo disparity is a tiny fraction of the
+  image, so it reads flat.
+
+### Why it kept happening, and what changed
+
+The hunt started itself, roughly ten seconds after the view stabilised, retrying up to three times:
+
+```cpp
+g_fov_stable_frames > 600 && g_fovfind_attempts < 3 && (g_fov_stable_frames % 1800) == 601
+```
+
+It pokes thousands of heap floats and writes each back afterwards. When a restore does not take, the
+projection is left wrong and nothing says so. **Auto-location is now removed** - `fovfind` and
+`fovhunt` are the only entry points, and a one-line log at startup says so.
+
+Three guardrails, each useful on its own:
+
+- **A candidate that narrows the view is rejected.** Every encoding in `kEnc` is built so a correct
+  address *widens*: `deg/rad/tan` are poked x1.3, and `proj_a`/`proj_b` hold `1/tan` so they are
+  poked x(1/1.3). The tangent must go **up**. All four hits above went down, and accepting them is
+  precisely how the world collapsed.
+- **Every restore is verified** by reading back, with failures counted and named in the log and a
+  loud warning at the end of a hunt. `fov restore` puts back every address a hunt has touched -
+  hits, candidates, and the selected address - not just the one `fov off` handles.
+- **The compositor refuses insane bounds.** Beyond a UV span of 2.0 (half the panel as border) it
+  submits the full frame instead and logs why. A wrong FOV should cost the wrong scale, never the
+  whole image. `bounds-refused=` is in the status block.
+
+The recovered world projection is also gated now, the same way camera yaw already was: a
+single-frame collapse of more than 2x is refused and the last believable value held. The test is on
+the *rate*, not the value, so a genuine scope still comes through - and it gives up after 10
+consecutive refusals, because latching onto whichever projection was seen first is a worse failure
+than the one being guarded. `world-proj-rejected=` is in the status block.

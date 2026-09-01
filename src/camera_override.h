@@ -97,6 +97,10 @@ float aim_authority();
 // reflection or scope pass wrote c189 last. Diagnostic only.
 unsigned camera_yaw_rejections();
 
+// Frames where the recovered world projection was refused as an implausible
+// single-frame collapse - a non-player pass wrote VP last. Diagnostic only.
+unsigned world_proj_rejections();
+
 // Which hand holds the weapon, kept in step with `input left|right`.
 void set_grip_hand(int hand);
 

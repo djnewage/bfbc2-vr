@@ -185,9 +185,16 @@ if ($dinputKind -eq 'ours' -or $dinputKind -eq 'absent') {
             Write-Host "dinput8.dll is loaded and could not be renamed - close the game to update it." -ForegroundColor Yellow
         }
     }
-    if (-not (Test-Path $DInputTarget)) {
-        Copy-Item $dll $DInputTarget -Force
+    # Copy unconditionally. This used to be guarded by "-not (Test-Path ...)",
+    # which meant that with the game CLOSED - the one case where the file can
+    # simply be overwritten - an existing dinput8.dll was left alone. The input
+    # proxy silently stayed at whatever build last managed to rename it aside,
+    # so the two halves of the same binary drifted apart across installs.
+    try {
+        Copy-Item $dll $DInputTarget -Force -ErrorAction Stop
         Write-Host "Installed input proxy -> $DInputTarget" -ForegroundColor Green
+    } catch {
+        Write-Host "dinput8.dll is loaded and could not be updated - close the game and retry." -ForegroundColor Yellow
     }
 } else {
     Write-Host "dinput8.dll exists and is NOT ours - left untouched. Controller input will use the SendInput fallback." -ForegroundColor Yellow

@@ -99,6 +99,17 @@ float g_hmd_dpos[3]  = {};      // delta in OpenVR axes (+X right, +Y up, -Z fwd
 // world scale is not yet measured, so it is runtime-adjustable: if the world
 // feels like a miniature, the offset is too big; like a giant's world, too
 // small. F2/F3 tune it, F1 swaps eyes (swapped eyes = depth pops inward).
+// Largest single-frame change in the world frustum we will believe. The player
+// cannot go from 124 to 18.5 degrees between two Presents; a jump that big is
+// another camera's projection, not theirs.
+constexpr float kMaxProjShrinkPerFrame = 0.5f;
+// How many consecutive implausible readings before we conclude the projection
+// really did change and accept it. Bounds the cost of a wrong hold to a few
+// frames, and stops the gate latching onto whatever it saw first.
+constexpr unsigned kWorldProjRunToAccept = 10;
+unsigned g_world_proj_rejected = 0;
+unsigned g_world_proj_run = 0;
+
 int   g_frame_eye    = 0;       // eye the CURRENT frame is being rendered for
 int   g_last_eye     = 0;       // eye the just-presented frame used
 float g_ipd_world    = 0.064f;  // world-units offset between eyes
@@ -736,8 +747,36 @@ void rebuild_correction()
 
     // The world projection, recovered from VP the same way per-draw
     // projections are, so comparisons are like against like.
-    if (!drawpolicy::recover_projection(g_vp, g_world_proj)) {
+    //
+    // Gated, because everything downstream trusts it: the eye bounds are
+    // computed from these tangents, and the viewmodel classifier keys on the
+    // weapon's projection DIFFERING from this one. A frame where a shadow,
+    // reflection or scope pass wrote VP last reports a frustum that is not the
+    // player's, and taking it costs the whole image - a collapse to 18.5 deg
+    // black-boxed the headset and made the gun unclassifiable in one go.
+    //
+    // The test is on a single-frame COLLAPSE, not on an absolute value, so a
+    // legitimately narrow field (a scope) still comes through as long as it
+    // arrives at a believable rate.
+    drawpolicy::ProjParams fresh{};
+    if (!drawpolicy::recover_projection(g_vp, fresh)) {
         g_world_proj = drawpolicy::ProjParams{};
+    } else if (g_world_proj.perspective && fresh.perspective) {
+        const float was = g_world_proj.tan_half_v(), now = fresh.tan_half_v();
+        if (was > 1e-4f && now > 1e-4f &&
+            (now < was * kMaxProjShrinkPerFrame || was < now * kMaxProjShrinkPerFrame) &&
+            ++g_world_proj_run < kWorldProjRunToAccept) {
+            ++g_world_proj_rejected;   // hold the last believable one
+        } else {
+            // Persisting means it is real, not a stray pass - a genuine scope
+            // toggle, or a first frame that captured the wrong camera. Refusing
+            // forever would latch the mod to whichever projection it happened to
+            // see first, which is a worse failure than the one being guarded.
+            g_world_proj_run = 0;
+            g_world_proj = fresh;
+        }
+    } else {
+        g_world_proj = fresh;
     }
     // Per-draw corrections are rebuilt lazily; frame index keys the cache.
 }
@@ -1034,6 +1073,7 @@ void compensate_body_turn(float body_delta_radians)
 
 unsigned g_cam_yaw_rejected = 0;
 unsigned camera_yaw_rejections() { return g_cam_yaw_rejected; }
+unsigned world_proj_rejections() { return g_world_proj_rejected; }
 
 bool game_camera_angles(float& yaw, float& pitch)
 {
@@ -1627,6 +1667,7 @@ void status(FILE* f)
             g_fov_auto ? 1 : 0, g_fov_manual, g_fov_widen_x, g_fov_widen_y,
             g_world_proj.tan_half_h(), g_world_proj.tan_half_v(), g_world_proj.near_z(), g_world_proj.far_z(),
             2.0f * std::atan(g_world_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_world_proj.tan_half_v()) * 180.0f / kPi);
+    fprintf(f, "     world-proj-rejected=%u\n", g_world_proj_rejected);
     fprintf(f, "weapon P: tan=%.4f/%.4f (deg %.1f x %.1f) near=%.3f\n",
             g_weapon_proj.tan_half_h(), g_weapon_proj.tan_half_v(),
             2.0f * std::atan(g_weapon_proj.tan_half_h()) * 180.0f / kPi, 2.0f * std::atan(g_weapon_proj.tan_half_v()) * 180.0f / kPi,
