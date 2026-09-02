@@ -120,6 +120,9 @@ float g_aim_residue = 0.0f;          // sub-count carry, or small errors would
 // still in flight from the error before acting on it, and retire it as the
 // camera's own yaw actually moves.
 float g_aim_inflight = 0.0f;
+// Frames the camera has not moved at all; the in-flight valve opens after this.
+unsigned g_aim_stationary = 0;
+constexpr unsigned kAimStationaryFrames = 30;
 float g_aim_last_cam_yaw = 0.0f;
 bool  g_aim_have_cam_yaw = false;
 unsigned g_aim_inflight_held = 0;    // times the correction was already in flight
@@ -381,9 +384,11 @@ void update_aim(int hand)
     {
         float cam_yaw = 0.0f, cam_pitch = 0.0f;
         if (camover::game_camera_angles(cam_yaw, cam_pitch)) {
+            bool camera_moved = false;
             if (g_aim_have_cam_yaw) {
                 const float moved = aimpolicy::body_delta(cam_yaw, g_aim_last_cam_yaw);
                 if (std::isfinite(moved)) {
+                    camera_moved = std::fabs(moved) > 1e-4f;
                     // Retire only: this may shrink toward zero, never grow. If
                     // the player mouse-turns against us, `moved` is negative and
                     // a bare subtraction would inflate the debt without bound.
@@ -395,8 +400,16 @@ void update_aim(int hand)
             }
             // Safety valve. If the camera never reflects what we asked for -
             // a menu, a cutscene, a dead player - the debt must not wedge the
-            // loop shut forever. Decays to nothing in well under a second.
-            g_aim_inflight *= 0.95f;
+            // loop shut forever.
+            //
+            // It must ONLY act when the camera is actually stationary. The
+            // view compensation is now offset + in-flight (what has landed),
+            // so decaying in-flight while a swing is in progress tells the
+            // view that motion landed when it did not: with 20 degrees in
+            // flight, 5 percent a frame was a 1 degree/frame phantom rotation
+            // - the "jump at the start of the burst" traced on 2026-09-02.
+            if (camera_moved) g_aim_stationary = 0;
+            else if (++g_aim_stationary > kAimStationaryFrames) g_aim_inflight *= 0.90f;
             if (std::fabs(g_aim_inflight) < 1e-4f) g_aim_inflight = 0.0f;
             g_aim_last_cam_yaw = cam_yaw;
             g_aim_have_cam_yaw = true;
