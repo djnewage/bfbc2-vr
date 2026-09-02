@@ -546,3 +546,19 @@ as a view jump, then bled back at 0.02°/frame as the drift.
   uses it directly and cannot reintroduce the loop-gain oscillation the in-flight accounting fixed.
 
 `returning=` and `returns=` are in the status block.
+
+### The snap was the view running ahead of the body (2026-09-02, later)
+
+With the swing absorbed and the return in place, firing with the head turned still snapped. A
+live trace of the loop during bursts showed the mechanism working (`returns` incrementing, offset
+walking back to zero) and the error correct — and `in-flight` at **±20°**.
+
+The view compensation was applied at *command* time, but the injected counts reach the game
+camera two or three frames later. For those frames the presented view was rotated by body
+motion that had not happened yet; with a 40° swing that is a ~20° view jump that unwinds as the
+camera catches up. In continuous mode the error was a degree or two, so the same transient was
+invisible.
+
+The offset stays decremented at command time (the return phase runs on it), but the **view** now
+uses `offset + in-flight`, which is exactly `−(landed)`. The compensation tracks what the camera
+has actually done. One line, no new state.

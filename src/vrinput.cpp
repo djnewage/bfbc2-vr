@@ -343,6 +343,7 @@ void publish()
     inputbus::publish_levels(g_want_keys, g_want_buttons);
 }
 
+
 // Steer the game's aim toward where the controller points.
 void update_aim(int hand)
 {
@@ -510,6 +511,8 @@ void update_aim(int hand)
 }
 
 } // namespace
+
+float aim_inflight() { return g_aim_inflight; }
 
 void release_all()
 {

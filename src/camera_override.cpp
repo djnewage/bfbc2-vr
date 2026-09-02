@@ -78,7 +78,18 @@ float g_turn_yaw = 0.0f;
 float g_aim_view_offset = 0.0f;
 
 // What the view actually uses: both contributions together.
-float view_turn_yaw() { return g_turn_yaw + g_aim_view_offset; }
+// The presented view is compensated for the body rotation that has actually
+// LANDED in the game camera. g_aim_view_offset is decremented at command time
+// (it has to be - it is the accounting the return phase runs on), but the
+// injected counts reach the camera two or three frames later. Presenting the
+// commanded offset meant the view turned first and the body caught up: with a
+// 40 degree firing-mode swing that was a 20 degree view jump that unwound
+// over the next frames - the "camera snap" reported with the head turned.
+//
+//   offset   = -(commanded)
+//   inflight =   commanded - landed
+//   offset + inflight = -(landed)
+float view_turn_yaw() { return g_turn_yaw + g_aim_view_offset + vrinput::aim_inflight(); }
 
 // The controller direction that means "aligned with the game's aim", captured
 // rather than assumed. Without it the raw grip axis was treated as the barrel -
