@@ -114,8 +114,8 @@ void classify(unsigned base, char* out, size_t out_size)
 
 FILE* open_dump(const char* kind, char* path_out, size_t path_size)
 {
-    _snprintf_s(path_out, path_size, _TRUNCATE, "%sbfbc2vr_%s_%02d.txt",
-                vrlog::module_dir().c_str(), kind, g_snapshot_index);
+    const std::string p = vrlog::dump_path(kind, static_cast<unsigned>(g_snapshot_index));
+    _snprintf_s(path_out, path_size, _TRUNCATE, "%s", p.c_str());
     FILE* f = nullptr;
     fopen_s(&f, path_out, "w");
     return f;

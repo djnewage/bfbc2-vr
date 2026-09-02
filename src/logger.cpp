@@ -13,6 +13,7 @@ std::mutex g_mutex;
 FILE*      g_file = nullptr;
 std::string g_dir;
 bool       g_initialized = false;
+std::string g_stamp;
 
 // Resolves the directory containing this DLL. We deliberately do NOT use the
 // process working directory - Steam does not guarantee what that is.
@@ -49,11 +50,17 @@ void init(const char* filename)
     // other writers out.
     g_file = _fsopen(path.c_str(), "w", _SH_DENYWR);
 
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    {
+        char stamp[32];
+        _snprintf_s(stamp, sizeof(stamp), _TRUNCATE, "%04d%02d%02d-%02d%02d%02d",
+                    t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        g_stamp = stamp;
+    }
     if (g_file) {
-        SYSTEMTIME t;
-        GetLocalTime(&t);
-        fprintf(g_file, "=== bfbc2vr proxy log - %04d-%02d-%02d %02d:%02d:%02d ===\n",
-                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        fprintf(g_file, "=== bfbc2vr proxy log - %04d-%02d-%02d %02d:%02d:%02d (dumps: %s) ===\n",
+                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, g_stamp.c_str());
         fflush(g_file);
     }
 }
@@ -79,5 +86,16 @@ void write(const char* fmt, ...)
 }
 
 const std::string& module_dir() { return g_dir; }
+
+const std::string& launch_stamp() { return g_stamp; }
+
+std::string dump_path(const char* kind, unsigned index, const char* ext)
+{
+    char name[128];
+    _snprintf_s(name, sizeof(name), _TRUNCATE, "bfbc2vr_%s_%s_%02u.%s",
+                kind ? kind : "dump", g_stamp.empty() ? "nostamp" : g_stamp.c_str(),
+                index, ext ? ext : "txt");
+    return g_dir + name;
+}
 
 } // namespace vrlog

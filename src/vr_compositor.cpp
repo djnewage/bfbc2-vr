@@ -232,9 +232,10 @@ void save_eye_bmps()
         if (SUCCEEDED(g_device->GetRenderTargetData(src, sys))) {
             D3DLOCKED_RECT lr = {};
             if (SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
-                char path[MAX_PATH];
-                _snprintf_s(path, sizeof(path), _TRUNCATE, "%sbfbc2vr_eye%c_%02d.bmp",
-                            vrlog::module_dir().c_str(), e == 0 ? 'L' : (e == 1 ? 'R' : 'H'), shot);
+                char kind[8];
+                _snprintf_s(kind, sizeof(kind), _TRUNCATE, "eye%c", e == 0 ? 'L' : (e == 1 ? 'R' : 'H'));
+                const std::string path_s = vrlog::dump_path(kind, static_cast<unsigned>(shot), "bmp");
+                const char* path = path_s.c_str();
                 FILE* f = nullptr;
                 fopen_s(&f, path, "wb");
                 if (f) {
@@ -682,7 +683,7 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
     if (!strcmp(cmd, "shot")) {
         if (!g_device) { _snprintf_s(reply, n, _TRUNCATE, "shot: no device yet"); return true; }
         save_eye_bmps();
-        _snprintf_s(reply, n, _TRUNCATE, "shot: eye BMPs written (bfbc2vr_eyeL/R_NN.bmp)");
+        _snprintf_s(reply, n, _TRUNCATE, "shot: eye BMPs written (bfbc2vr_eyeL/R_<stamp>_NN.bmp)");
         return true;
     }
     if (!strcmp(cmd, "hud")) {

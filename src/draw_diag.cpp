@@ -106,8 +106,8 @@ void dump()
     }
     std::sort(aggs.begin(), aggs.end(), [](const Agg& x, const Agg& y) { return x.draws > y.draws; });
 
-    char path[MAX_PATH];
-    _snprintf_s(path, sizeof(path), _TRUNCATE, "%sbfbc2vr_draws_%02u.txt", vrlog::module_dir().c_str(), g_dump_index);
+    const std::string path_s = vrlog::dump_path("draws", g_dump_index);
+    const char* path = path_s.c_str();
     FILE* f = nullptr;
     fopen_s(&f, path, "w");
     if (!f) { VRLOG("[draws] failed to open %s", path); return; }
