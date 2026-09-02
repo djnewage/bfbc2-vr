@@ -29,4 +29,10 @@ void release_all();
 bool command(const char* cmd, const char* args, char* reply, size_t reply_size);
 void status(FILE* f);
 
+// Yaw the aim loop has commanded that the game camera has not yet shown -
+// mouse counts take a few frames to land. The view compensation must be
+// applied against what has LANDED, not what was commanded, or the view jumps
+// ahead of the body by this amount and snaps back as the camera catches up.
+float aim_inflight();
+
 } // namespace vrinput
