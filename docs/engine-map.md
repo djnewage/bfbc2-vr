@@ -29,9 +29,36 @@ here is ever used against multiplayer or Venice Unleashed.
 | `c185..c192` is written by **every geometry pass** | shadow, reflection and main scene all write it; "last writer" collapsed the world field 58.9° → 18.5° | `bfbc2vr.log` 2026-09-01 (`cam-yaw-rejected=15472/15960`), `docs/controls.md` |
 | Overriding `c185..c192` does not move the world | BC2 pre-multiplies WVP per object on the CPU (~456 draws/frame rewrite `c6..c18`) | `src/camera_override.h:5-11` recording |
 | Global camera block is row-major; compiled shader constants are column-major | | `docs/phase3-results.md:37` |
-| Vertex shaders with CTAB | 65 parsed, 0 stripped (2026-08) — superseded by the `shaders` dump | `src/shader_registry.h:36`; `bfbc2vr_shaders_<stamp>_NN.txt` |
+| Shaders | 65 vertex + 145 pixel exist at launch (menu/core); **1,711 vertex + 3,920 pixel** once a level is loaded, all with CTAB | `bfbc2vr_shaders_20260902-094431_00.txt` / `_01.txt` |
+| **`c185..c210` is an anonymous per-view constants block** | 44 vertex shaders declare `constants c185+26` (bound 13,605 times); its first 8 registers are the VP + camera-to-world the mod reads. Named shaders never see `c185` — they take `viewProjMatrix` at `c0`/`c4`/`c8`, `cameraPos c4/c8`, `viewMatrix c4+2/c8+2`. In skinned shaders `boneMatrices` (`c5..c21 +180`) overlaps the same registers | `_01.txt` "register -> names" index |
+| Named transforms | `worldViewProjMatrix c0+4 / c4+4`, `viewProjMatrix c0+4 / c4+4 / c8+4`, `worldMatrix c0+3 / c4+3`, `worldViewProj c0+4`; `boneMatrices` at 9 different bases | same |
+| Gun-body shader `2906751E3B758F6F` | `viewProjMatrix c0+4`, `outdoorLightShadowTransform0 c5+3`, `boneMatrices c9+180` (bones carry the world; no `worldMatrix`) | `_01.txt` |
+| Vertex shader families | 28 `bones + constants + worldViewProjMatrix` (soldiers/weapons); 15 with no transform (post-process quads: `g_focalLen`, `radialBlur*`, `screenScale`); 11 `constants + viewProjMatrix` (megashaders, world in the blob); 4 `bones + worldMatrix + WVP`; **3 `viewProjMatrix + worldMatrix` separately** — the cleanest VR correction targets; 3 WVP-only; 1 `worldViewProj` | same |
+| Post chain (pixel samplers) | `zBuffer`, `zBufferHalfRes`, `depthTexture`, `dofBlurTexture`, `exposureTexture`/`oldExposureTexure`, `tonemapBloomTexture`, `filmGrainTexture`, `flareTexture`, `avgColorTexture`; GI/lightmaps as `sampler_duster*` and `sampler_radiosityMap`; `sampler_BackgroundTextureY/R/B` = YUV video | same |
 
-## Rendering — passes and projections
+## Rendering — the frame, pass by pass
+
+Measured by `passes 3` in a level, 2026-09-02 (`bfbc2vr_passes_20260902-094431_01.txt`). 31 passes,
+identical across frames. A pass = a contiguous run of draws with the same render-target set.
+
+| Pass | Target | Draws | What it is |
+|---|---|---|---|
+| 01 | backbuffer `X8R8G8B8` + `D24S8`, full clear | 0 | frame start |
+| 02–04 | 3 × 2048² `'NULL'` colour + `D16` depth, `clears=Z` | 19 / 3 / 14 | **three shadow cascades** (depth-only via the NULL target). **Write no camera block.** |
+| 05 | 256×32 `R32F` | 1 quad | lookup / histogram |
+| **06** | 2048×1536 **`A16B16G16R16F`** + **`'INTZ'`**, full clear | 38, 25+ shaders | **main opaque scene** — HDR with readable depth. **Writes no camera block.** |
+| 07, 09 | 2048×1536 `R32F` | 1 quad | depth linearise |
+| 08 | HDR again, no clear | 13 | second depth slice / decals |
+| 10 | 1024×768 HDR + INTZ | 5 | half-res (particles) |
+| **11** | HDR, **`clears=Z\|STENCIL`** | 15, incl. gun-body `2906751E…` | **first-person weapon pass.** Depth cleared so it draws over the world. **The only pass that writes `c185`** (2 writes/frame, `near=0.10`), and the one the election picks. |
+| 12–29 | 512×384 → 1×1, `A16B16G16R16F` and `R32F` | 1 quad each | bloom mip chain, exposure/luminance reduction |
+| 30 | backbuffer, `clears=Z\|STENCIL` | 50 | HUD + final composite |
+
+Consequences: the camera block at `c185` is the **viewmodel** camera (which is why the census found
+it "carries only the 0.1 m projection" while 670 world draws use 7.48 / 21.34 m — the world passes
+never upload it); the shadow cascades are **not** the contaminator that collapsed the world field
+yesterday (they write nothing to `c185`); and the world is rendered HDR with INTZ depth, so a stereo
+implementation has real depth to work with and passes 12–29 are screen-space.
 
 | Fact | Value | Proof |
 |---|---|---|
@@ -86,8 +113,7 @@ Read off the file by `tools/ghidra/dump_reflection.py`; full dump in `docs/recon
 - Statics `GameContext 0x1570C40`, `WorldRender 0x156B7F4` — inside the image, unverified.
 - Offsets of the *runtime* classes in `bc2-engine.md` (`ClientControllableEntity.m_cameraLocalSpace`, `ClientWeaponFiringEffects.m_shootSpace`, `RenderView.*`) — not reflected; runtime only.
 - Whether writing `GameRenderSettings.ForceFov` is the sanctioned lever the FOV hunt has been emulating, and whether the poke-found object (vtable `0x014755C8`) *is* the render-settings instance. Test: find the `GameRenderSettings` instance at runtime and compare `+0x18` against the value `fovfind` locates.
-- Which shader names `c185`/`c189` — `shaders` dump pending (first in-game run on this branch).
-- The render-pass order and which pass the camera election picks — `passes` dump pending.
+- What wrote the 18.5° projection to `c185` on 2026-09-01: not the shadow cascades (they write none). In a normal frame only pass 11 writes it. Needs a `passes` capture during a recurrence.
 - World scale (`units_per_metre`, assumed 1.0 at `draw_policy.h:206`).
 - Whether `bone0` carries bind space or view — `bfbc2vr_draws_*` prints it; nobody has recorded the answer.
 - `GetGlobalVariable("Game.AutoAimEnabled", …)` at `.text:00567B49` — a named-variable registry, never probed.
