@@ -507,3 +507,25 @@ stick delivers real deflection. Two rounds of input fixes were chasing a symptom
 
 `cam-candidates=` and `promote-failed=` are in the status block. `cam-yaw-rejected` near zero is the
 signal that this is healthy; ~97 percent of frames is what the failure looked like.
+
+## Firing mode: absorb the swing, then bring the body back (2026-09-02)
+
+`aim mode firing` is the traditional-VR-shooter layout Tristan asked for: the stick turns the
+body, the gun aims freely, and only while the trigger is held does the body swing to line the
+camera up with the barrel (rounds still leave the camera until shots spawn from the barrel).
+
+Two reports followed: *"my head snaps to a different position"* when firing, and a slow drift
+afterwards. One cause. The view-hold that keeps the world still while the body swings was capped at
+25°, tuned for continuous mode where the error is never more than a degree or two. In firing mode
+the trigger is pulled with the gun 40–70° off the body; the cap absorbed 25° and the rest appeared
+as a view jump, then bled back at 0.02°/frame as the drift.
+
+- The cap is now **per mode**: 25° continuous, 120° firing, so the whole swing is absorbed.
+- On trigger release the loop enters a **return** phase: it commands the body back by exactly the
+  held offset, compensated, so the offset walks to zero while the presented view does not move. The
+  body ends up under the head. No bleed of the view, no drift. A new trigger pull cancels the
+  return and the aim error takes over from wherever the body is.
+- The offset is decremented at *command* time, so it already excludes what is in flight; the return
+  uses it directly and cannot reintroduce the loop-gain oscillation the in-flight accounting fixed.
+
+`returning=` and `returns=` are in the status block.
