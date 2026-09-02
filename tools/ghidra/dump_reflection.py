@@ -253,6 +253,45 @@ for va in order:
             'offset': dw(e + 16), 'attributes': dw(e + 20),
         })
 
+# ---- inheritance and runtime ids, from a live image (optional) ---------------
+# The runtime TypeInfo objects are zero on disk but populated in an image
+# written by the mod's `dumpimage`. Their layout, read off such an image:
+#   +00 vtable (one per kind)   +04 TypeInfoData*   +08 TypeInfo* next
+#   +0C runtime id              +14 TypeInfo* super  +24 FieldInfo* fields
+# The registry head is the static at 0x0154D4B4; the list is null-terminated
+# (1,986 nodes on 2026-09-02). Pass the image as a third argument to fill in
+# each class's parent; nothing else changes.
+S_FIRST = 0x0154D4B4
+live_nodes = 0
+if len(sys.argv) > 3 and os.path.exists(sys.argv[3]):
+    L = open(sys.argv[3], 'rb').read()
+    def ldw(va):
+        o = va - BASE
+        return struct.unpack_from('<I', L, o)[0] if 0 <= o < len(L) - 3 else None
+    obj_rec = {}
+    cur = ldw(S_FIRST); seen = set()
+    while cur and cur not in seen and len(seen) < 20000:
+        seen.add(cur); rec = ldw(cur + 4)
+        if rec: obj_rec[cur] = rec
+        cur = ldw(cur + 8)
+    live_nodes = len(seen)
+    for obj, rec in obj_rec.items():
+        t = types.get(rec)
+        if not t: continue
+        t['runtime_id'] = ldw(obj + 0x0C)
+        sup = ldw(obj + 0x14)
+        sup_rec = obj_rec.get(sup)
+        if sup == obj:                     # the root (DataContainer) links to itself
+            t['super'] = None
+        elif sup_rec in types:
+            t['super'] = types[sup_rec]['name']
+        elif sup and 0x01406000 <= sup < 0x014F1000:
+            # The flags-0x29 kind (vtable 0140C710) keeps its vtable here: a
+            # different object layout. Parent unknown, not wrong.
+            t['super'] = '?'
+        else:
+            t['super'] = ('%08X' % sup) if sup else None
+
 # ---- checks ------------------------------------------------------------------
 checks = []
 def check(cond, msg): checks.append(('ok  ' if cond else 'FAIL') + '  ' + msg)
@@ -314,6 +353,7 @@ with open(os.path.join(OUT, 'reflection.txt'), 'w', encoding='utf-8') as o:
             % (len(order), gaps, len(classes), len(enums), ctr_links, sum(len(r['fields']) for r in classes)))
     o.write('# %d TypeInfo objects mapped to records via ctr; %d records found outside the typeinfo section\n'
             % (len(obj2rec), sum(1 for va in order if types[va].get('note') == 'record outside typeinfo section')))
+    if live_nodes: o.write('# live registry walked from *(0x%08X): %d nodes; inheritance and runtime ids filled from it\n' % (S_FIRST, live_nodes))
     o.write('# flags histogram: ' + ', '.join('0x%02X:%d' % kv for kv in sorted(flag_hist.items())) + '\n')
     o.write('#\n# checks:\n')
     for c in checks: o.write('#   ' + c + '\n')
@@ -323,6 +363,8 @@ with open(os.path.join(OUT, 'reflection.txt'), 'w', encoding='utf-8') as o:
         kind = {0x29: 'class', 0x179: 'enum ', 0x35: 'type '}.get(r['flags'], 'f%04X' % r['flags'])
         o.write('%s %-40s @%08X size=0x%-4X align=%-2d fields=%-3d module=%08X misc_hi=%04X'
                 % (kind, r['name'], va, r['size'], r['align'], r['field_count'], r['module'] or 0, r['misc_hi']))
+        if r.get('super'): o.write('  : %s' % r['super'])
+        if r.get('runtime_id') is not None: o.write('  id=%d' % r['runtime_id'])
         if r.get('table_from'): o.write('  table via ' + r['table_from'])
         if r.get('note'): o.write('   ! ' + r['note'])
         o.write('\n')

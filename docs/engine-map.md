@@ -16,7 +16,7 @@ here is ever used against multiplayer or Venice Unleashed.
 | Image base / size (runtime) | `0x00400000` / `0x1970000` (ends `0x1D70000`) | header of every `bfbc2vr_draws_*.txt` |
 | Reflection type names retained | **890 distinct `*Data` identifiers**, incl. `ShotConfigData`, `CameraData`, `SoldierEntity`, `EntityData` ×182 | `grep -a` over the exe, 2026-09-02 |
 | `bc2-engine.md` static `Client 0x180AD880` | **not an image address** on this build (past `0x1D70000`) | image geometry above |
-| `.text` is **SteamStub-encrypted on disk** | entropy 8.00; entry point `0x019142EE` inside a section named `.bind` (entropy 7.99). Static analysis of engine *code* needs a runtime image dump | `tools/ghidra/explore_typeinfo.py` section table, `build/ghidra/out/type_registration.txt` (the constructor decompiles as junk) |
+| `.text` is **SteamStub-encrypted on disk** | entropy 8.00; entry point `0x019142EE` inside a section named `.bind` (entropy 7.99). The mod's `dumpimage` verb writes the decrypted in-memory image (`.text` entropy 6.32, `unreadable=0`), which is what Ghidra should analyse | `tools/ghidra/explore_typeinfo.py` section table, `build/ghidra/out/type_registration.txt` (the constructor decompiles as junk) |
 | Static initialisers live in an unencrypted section named **`ctr`** | RVA `0xF87000`, entropy 6.25; every type registration is a `push <TypeInfoData>; mov ecx,<TypeInfo>; call` sequence there — 2,081 sites, 941 to ctor `0x00500880`, 273 to `0x0043C390` | `type_registration.txt` |
 | Reflection data has its own sections: **`typeinfo`** (RVA `0x17F1000`, 0x22D18 B) and **`fieldinf`** (RVA `0x1814000`, 0x34E60 B) | unencrypted; **readable from the file with no runtime** | `tools/ghidra/dump_reflection.py` |
 
@@ -88,6 +88,8 @@ Read off the file by `tools/ghidra/dump_reflection.py`; full dump in `docs/recon
 | | `LevelData` (0x3C0): `Float32 DefaultFOV @0x1F4`, `InfantryFOVMultiplier @0x1F0` (the poke-found object's `45.1 = 55 × 0.82` is this) | same |
 | | `CameraData` (0x40): occlusion/fade only — **no FOV field**; `GameSettings.AutoAimEnabled @0x9C` | same |
 | `bc2-engine.md` claims now **verified**: `ShotConfigData` 0x00/0x10/0x20; `SoldierWeaponData.m_zoomRenderFov +0x30`, `m_renderFov +0x3C` | | above |
+| **Runtime `TypeInfo` object** (from the `dumpimage` image, where they are populated) | `+00` vtable (one per kind: `0x01412E18` class ×962, `0x0140C710` embedded-table class ×281, `0x01412888` enum ×231, `0x01412768` ×486, one each per scalar), `+04` `TypeInfoData*`, **`+08` `m_next`**, `+0C` runtime id, `+10` per-class function, **`+14` `m_super`** (except the `0x0140C710` kind, which keeps its vtable there), `+24` runtime `FieldInfo*` | `tools/ghidra/dump_reflection.py --live`; e.g. `AIMeshTestData→EntityData`, `AISettingsData→Asset`, `SoldierEntityData→ControllableEntityData`, `LevelData→WorldData` |
+| **Registry head** | the static **`0x0154D4B4`** (`.data`, RVA `0x114D4B4`) holds the first `TypeInfo`; following `+08` visits **1,986 nodes** and ends in null. The last-registered type (`WorldBuildView`) is the head, so the constructor prepends | live image 2026-09-02 |
 | Not reflected at all (runtime classes): `SoldierEntity`, `ClientPlayer`, `RenderView`, `ClientSoldierWeapon`, `AnimatedSoldier`, `PlayerManager` — no such type-name strings | so their offsets in `bc2-engine.md` can only be checked at runtime | `frostbite_types.txt` controls |
 
 ## Engine objects
@@ -108,8 +110,8 @@ Read off the file by `tools/ghidra/dump_reflection.py`; full dump in `docs/recon
 
 ## Open questions (not yet verified on this build)
 
-- The registry's linked list (`TypeInfo::m_next`) and its static head: the constructor `0x00500880` is in encrypted `.text`. Needs a **runtime image dump** (the mod is already in-process) and a second Ghidra pass over the decrypted image.
-- `ITypedObject::getType` at vslot 3 — runtime only.
+- `ITypedObject::getType` at vslot 3 — the live camera object's vtable `0x014755C8` has no RTTI locator (engine built without RTTI); its eight virtuals are now decompilable from the `dumpimage` image (Ghidra pass pending).
+- Where `GameRenderSettings` lives at runtime: `GameRenderSettings : DataContainer` per the registry, and its fields are the `Render.*` global-variable names, yet **no populated instance of that layout exists in the process** (three shape scans, `tools/ghidra/find_render_settings.py`). The `Render.*` resolver is in `.text` — decompile it from the live image.
 - Statics `GameContext 0x1570C40`, `WorldRender 0x156B7F4` — inside the image, unverified.
 - Offsets of the *runtime* classes in `bc2-engine.md` (`ClientControllableEntity.m_cameraLocalSpace`, `ClientWeaponFiringEffects.m_shootSpace`, `RenderView.*`) — not reflected; runtime only.
 - Whether writing `GameRenderSettings.ForceFov` is the sanctioned lever the FOV hunt has been emulating, and whether the poke-found object (vtable `0x014755C8`) *is* the render-settings instance. Test: find the `GameRenderSettings` instance at runtime and compare `+0x18` against the value `fovfind` locates.

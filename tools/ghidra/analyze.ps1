@@ -17,12 +17,17 @@
 param(
     [string]$Ghidra  = "C:\tools\ghidra_12.1.3_PUBLIC",
     [string]$GameDir = "C:\Program Files (x86)\Steam\steamapps\common\Battlefield Bad Company 2",
-    [switch]$NoImport
+    [switch]$NoImport,
+    # Analyse the decrypted image written by the mod's `dumpimage` verb
+    # (build\ghidra\BFBC2Game_live.exe) instead of the SteamStub-encrypted
+    # on-disk executable. Separate program name and output directory.
+    [switch]$Live
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Proj = Join-Path $Root "build\ghidra"
-$Out  = Join-Path $Proj "out"
+$Out  = Join-Path $Proj $(if ($Live) { "out_live" } else { "out" })
+$Prog = if ($Live) { "bfbc2live" } else { "bfbc2" }
 $Exe  = Join-Path $GameDir "BFBC2Game.exe"
 $Headless = Join-Path $Ghidra "support\analyzeHeadless.bat"
 
@@ -39,13 +44,17 @@ if (-not $env:JAVA_HOME) {
 }
 Write-Host "JAVA_HOME = $env:JAVA_HOME"
 
-$common = @($Proj, "bfbc2", "-scriptPath", $PSScriptRoot,
+$common = @($Proj, $Prog, "-scriptPath", $PSScriptRoot,
             "-postScript", "FindFrostbiteTypes.java", $Out,
             "-postScript", "ExportFunctions.java", $Out,
             "-postScript", "FindTypeRegistration.java", $Out)
 
 if ($NoImport) {
-    & $Headless @common -process "BFBC2Game.exe" -noanalysis
+    & $Headless @common -process $(if ($Live) { "BFBC2Game_live.exe" } else { "BFBC2Game.exe" }) -noanalysis
+} elseif ($Live) {
+    $Staged = Join-Path $Proj "BFBC2Game_live.exe"
+    if (-not (Test-Path $Staged)) { throw "no live image at $Staged - run 'dumpimage' in game and copy bfbc2vr_image_*.exe there" }
+    & $Headless @common -import $Staged -overwrite
 } else {
     # analyzeHeadless.bat is a cmd script, and cmd cannot pass a path containing
     # "(x86)" through its argument parsing intact. Stage a copy of the exe under
