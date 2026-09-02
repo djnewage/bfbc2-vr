@@ -153,6 +153,12 @@ bool g_melee_prev = false;
 unsigned long long g_melee_until = 0;
 float g_aim_last_error = 0.0f;
 unsigned g_aim_last_seq = 0;         // one correction per FRESH controller sample
+// Firing mode: after the trigger is released, drive the body back under the
+// head (view compensated) rather than bleeding the view back to the body.
+bool g_aim_returning = false;
+bool g_aim_trigger_was = false;
+unsigned g_aim_returns = 0;
+constexpr float kAimReturnDone = 0.4f * aimpolicy::kPi / 180.0f;
 bool g_aim_only_firing = false;      // 'aim mode firing': converge only while
                                      // the trigger is pulled, so idle hand
                                      // movement never drags the body
@@ -341,10 +347,19 @@ void publish()
 void update_aim(int hand)
 {
     if (!g_aim_on) { ++g_aim_why[kAimDisabled]; return; }
-    if (g_aim_only_firing && g_in[hand].trigger < g_trigger_threshold) {
-        ++g_aim_why[kAimDisabled];
-        camover::bleed_turn_offset();
-        return;
+    if (g_aim_only_firing) {
+        const bool firing = g_in[hand].trigger >= g_trigger_threshold;
+        // Trigger released with the body swung toward the gun: start bringing
+        // the body back under the head. A new pull cancels the return - the
+        // aim error takes over from wherever the body is.
+        if (g_aim_trigger_was && !firing) g_aim_returning = true;
+        if (firing) g_aim_returning = false;
+        g_aim_trigger_was = firing;
+        if (!firing && !g_aim_returning) {
+            ++g_aim_why[kAimDisabled];
+            camover::bleed_turn_offset();   // should already be zero; keeps it honest
+            return;
+        }
     }
 
     // One correction per fresh controller sample. Present runs faster than the
@@ -389,12 +404,27 @@ void update_aim(int hand)
 
     float err_yaw = 0.0f, err_pitch = 0.0f;
     int reason = 0;
-    if (!camover::aim_error(err_yaw, err_pitch, reason)) {
+    if (g_aim_returning) {
+        // Turn the body by the held offset, compensated, and the offset walks
+        // to zero while the presented view does not move. The offset is
+        // decremented at COMMAND time (compensate_aim_turn), so it already
+        // excludes what is in flight - no in-flight subtraction here, or the
+        // return would under-shoot and stall.
+        err_yaw = camover::aim_view_offset();
+        if (std::fabs(err_yaw) < kAimReturnDone) {
+            g_aim_returning = false;
+            camover::clear_aim_view_offset();
+            g_aim_residue = 0.0f;
+            ++g_aim_returns;
+            return;
+        }
+    } else if (!camover::aim_error(err_yaw, err_pitch, reason)) {
         static const AimWhy map[5] = { kAimNoController, kAimNoHmd, kAimNoReference, kAimNoController, kAimPole };
         ++g_aim_why[map[(reason >= 0 && reason < 5) ? reason : 0]];
         camover::bleed_turn_offset();   // idle for any reason: keep converging
         return;
     }
+    if (!g_aim_returning) {
     g_aim_last_error = err_yaw;
 
     // Act on what is left after the corrections already on their way.
@@ -448,6 +478,7 @@ void update_aim(int hand)
         turn_body((err_yaw > 0.0f ? 1.0f : -1.0f) * kSignProbeRadians);
         return;
     }
+    }   // !g_aim_returning
 
     float step = err_yaw * g_aim_kp;
     step = (std::min)((std::max)(step, -g_aim_max_step), g_aim_max_step);
@@ -710,6 +741,8 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
             } else if (!_stricmp(a1, "mode")) {
                 char b2[16] = {}; if (args) sscanf_s(args, "%*s %15s", b2, static_cast<unsigned>(sizeof(b2)));
                 if (b2[0]) g_aim_only_firing = (_stricmp(b2, "firing") == 0);
+                camover::set_turn_offset_mode(g_aim_only_firing);
+                g_aim_returning = false; g_aim_trigger_was = false;
             } else if (!_stricmp(a1, "deadzone")) {
                 char b2[16] = {}; if (args) sscanf_s(args, "%*s %15s", b2, static_cast<unsigned>(sizeof(b2)));
                 if (b2[0]) g_aim_deadzone = (std::min)((std::max)(static_cast<float>(atof(b2)), 0.0f), 0.2f);
@@ -869,8 +902,8 @@ void status(FILE* f)
                                 " %s=%c", a.name, key_label(a.vk));
         fprintf(f, "%s\n", g_status_keys);
     }
-    fprintf(f, "  melee clicks refused (stick not centred)=%u  waiting-on-in-flight=%u  turn-sign=%s\n",
-            g_melee_suppressed, g_aim_inflight_held,
+    fprintf(f, "  melee clicks refused (stick not centred)=%u  waiting-on-in-flight=%u  returning=%d returns=%u  turn-sign=%s\n",
+            g_melee_suppressed, g_aim_inflight_held, g_aim_returning ? 1 : 0, g_aim_returns,
             g_turn_sign_known ? (g_turn_sign > 0 ? "+1" : "-1") : "UNKNOWN (probing)");
     fprintf(f, "  gate: disabled=%u not-foreground=%u no-controllers=%u | turn: busy=%u no-camera=%u no-response=%u measured=%u\n",
             g_gate_disabled, g_gate_not_foreground, g_gate_no_controllers,

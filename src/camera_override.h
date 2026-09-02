@@ -113,6 +113,15 @@ void compensate_aim_turn(float body_yaw_delta);
 // offset never becomes a permanent lie about where the body faces.
 void bleed_turn_offset();
 
+// The view-hold offset itself, for the firing-mode return: after the trigger
+// is released the body is driven back under the head by exactly this amount,
+// compensated, so the view stays still and the offset returns to zero with no
+// visible motion - instead of bleeding the VIEW back, which was a drift.
+float aim_view_offset();
+void  clear_aim_view_offset();
+// Widen the hold cap in firing mode, where the whole swing must be absorbed.
+void  set_turn_offset_mode(bool firing);
+
 // Rotate the PRESENTED view by `radians` (positive = left, matching the yaw
 // convention in aim_policy.h). Used by snap turn. This is the only sanctioned
 // way to move the view reference; it keeps the already-computed head delta

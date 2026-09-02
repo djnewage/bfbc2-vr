@@ -91,7 +91,15 @@ bool  g_aim_ref_valid = false;
 // The view may lead the body by at most this much, and drifts back toward
 // alignment when the loop is idle. Unbounded it reached -40 degrees, at which
 // point "straight ahead" no longer meant "where my body faces".
-constexpr float kMaxTurnOffset = 25.0f * kPi / 180.0f;
+// How far the presented view may diverge from the body while the aim loop is
+// holding it still. In continuous mode the loop tracks the gun all the time so
+// the error at any instant is a degree or two and 25 is never approached. In
+// firing mode the player aims freely and pulls the trigger with the gun 40-70
+// degrees off the body; the whole swing has to be absorbed or the excess shows
+// up as a view jump ("my head snapped") and then bleeds back as a slow drift.
+constexpr float kMaxTurnOffsetContinuous = 25.0f  * kPi / 180.0f;
+constexpr float kMaxTurnOffsetFiring     = 120.0f * kPi / 180.0f;
+float g_max_turn_offset = kMaxTurnOffsetContinuous;
 constexpr float kTurnBleedPerFrame = 0.02f * kPi / 180.0f;
 bool  g_full_orientation = true;   // 'headroll off' falls back to yaw+pitch
 float g_hmd_dpos[3]  = {};      // delta in OpenVR axes (+X right, +Y up, -Z fwd)
@@ -1643,7 +1651,16 @@ void compensate_aim_turn(float body_yaw_delta)
     // Bounded: this is a standing divergence between what the player sees and
     // where their body faces, and unbounded it became a permanent one.
     g_aim_view_offset = aimpolicy::wrap_pi(g_aim_view_offset - body_yaw_delta);
-    g_aim_view_offset = (std::min)((std::max)(g_aim_view_offset, -kMaxTurnOffset), kMaxTurnOffset);
+    g_aim_view_offset = (std::min)((std::max)(g_aim_view_offset, -g_max_turn_offset), g_max_turn_offset);
+}
+
+float aim_view_offset() { return g_aim_view_offset; }
+
+void clear_aim_view_offset() { g_aim_view_offset = 0.0f; }
+
+void set_turn_offset_mode(bool firing)
+{
+    g_max_turn_offset = firing ? kMaxTurnOffsetFiring : kMaxTurnOffsetContinuous;
 }
 
 void bleed_turn_offset()
