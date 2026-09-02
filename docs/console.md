@@ -27,6 +27,9 @@ in the headset** — the game just sits in a singleplayer level with SteamVR run
 | `shaders` | dump every parsed constant table — see *Engine recon* below |
 | `passes [n]` | record `n` frames of render passes (default 2, max 8) |
 | `consts` / `consts baseline` / `consts diff` | F9 / F10 / F11 without the keyboard |
+| `dumpimage` | write the decrypted in-memory image as a loadable PE (for Ghidra) |
+| `gvar <Module.Field> [float\|bool\|int\|uint]` | resolve a setting through the engine's own `GetGlobalVariable`; read-only |
+| `gvarset <Module.Field> <float>` | write one float through it — `gvarset Render.ForceFov 100` is the whole FOV widen; `-1` restores |
 | `widen <x>` / `auto on\|off` | manual FOV widen factor / automatic headset match |
 | `mode <0-3>` / `push <m>` | weapon projection mode / arm's-length push |
 | `ownproj on\|off` | per-draw own-projection correction (off = old global path) |

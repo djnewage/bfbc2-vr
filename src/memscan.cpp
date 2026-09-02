@@ -618,6 +618,71 @@ void hunt_tick()
     if (g_hunt_i % 100 == 0) VRLOG("[hunt] %zu/%zu candidates tried, %zu hits so far", g_hunt_i, g_hunt.size(), g_hits.size());
 }
 
+bool read_ptr(void* addr, void*& out)
+{
+    __try { out = *static_cast<void**>(addr); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// ---- the engine's own settings lookup ---------------------------------------
+// Decompiled from the dumpimage image (docs/recon/decompiled-live.txt): the
+// game resolves "Module.Field" names to live storage through
+//
+//     void* __thiscall GetGlobalVariable(Registry* this, const char* name, TypeInfo* type)
+//
+// at 0x004F4C40, with the registry singleton in the static at 0x0155E05C. It
+// splits on the dot, finds the module's instance, and resolves the field BY
+// NAME through reflection - so "Render.ForceFov" resolves to
+// GameRenderSettings::ForceFov (Float32 @+0x18) even though no such string
+// exists in the binary. The TypeInfo argument is the field's expected type;
+// the scalar objects are at fixed addresses (docs/engine-map.md).
+//
+// The image base is 0x00400000 on every launch recorded (no ASLR), and that
+// is checked here rather than assumed.
+namespace gvar {
+constexpr uintptr_t kFn        = 0x004F4C40;
+constexpr uintptr_t kRegistry  = 0x0155E05C;
+constexpr uintptr_t kFloat32   = 0x01BF13E4;
+constexpr uintptr_t kBoolean   = 0x01BF1354;
+constexpr uintptr_t kInt32     = 0x01BF13B4;
+constexpr uintptr_t kUint32    = 0x01BF13A4;
+// __fastcall with a dead EDX slot is how a __thiscall free function is
+// spelled through a pointer in MSVC: ECX = this, the rest on the stack,
+// callee cleans.
+typedef void* (__fastcall* Fn)(void* self, void* edx_unused, const char* name, void* type);
+
+bool image_ok()
+{
+    return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) == 0x00400000u;
+}
+
+void* lookup(const char* name, uintptr_t type_obj, char* err, size_t n)
+{
+    if (!image_ok()) { _snprintf_s(err, n, _TRUNCATE, "image base is not 0x400000"); return nullptr; }
+    void* self = nullptr;
+    if (!read_ptr(reinterpret_cast<void*>(kRegistry), self) || !self) {
+        _snprintf_s(err, n, _TRUNCATE, "registry static %08X is null", static_cast<unsigned>(kRegistry)); return nullptr;
+    }
+    void* out = nullptr;
+    __try {
+        out = reinterpret_cast<Fn>(kFn)(self, nullptr, name, reinterpret_cast<void*>(type_obj));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        _snprintf_s(err, n, _TRUNCATE, "GetGlobalVariable faulted"); return nullptr;
+    }
+    if (!out) _snprintf_s(err, n, _TRUNCATE, "not found");
+    return out;
+}
+
+uintptr_t type_for(const char* t)
+{
+    if (!t || !*t || !_stricmp(t, "float")) return kFloat32;
+    if (!_stricmp(t, "bool"))  return kBoolean;
+    if (!_stricmp(t, "int"))   return kInt32;
+    if (!_stricmp(t, "uint"))  return kUint32;
+    return 0;
+}
+} // namespace gvar
+
 float* parse_addr(const char* s)
 {
     if (!s) return nullptr;
@@ -745,6 +810,35 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
         const unsigned off = has2 ? static_cast<unsigned>(strtoul(a2, nullptr, 16)) : 0x50u;
         list_objects(vt, off, 64);
         _snprintf_s(reply, n, _TRUNCATE, "objects: %zu with vtable %08X (see [objects] lines)", g_cands.size(), vt);
+        return true;
+    }
+    if (!strcmp(cmd, "gvar")) {
+        // Read-only: resolve a "Module.Field" name through the engine's own
+        // GetGlobalVariable and report where it lives and what it holds.
+        if (!has1) { _snprintf_s(reply, n, _TRUNCATE, "usage: gvar <Module.Field> [float|bool|int|uint]"); return true; }
+        const uintptr_t ty = gvar::type_for(has2 ? a2 : "float");
+        if (!ty) { _snprintf_s(reply, n, _TRUNCATE, "gvar: unknown type %s", a2); return true; }
+        char err[96] = {};
+        void* p = gvar::lookup(a1, ty, err, sizeof(err));
+        if (!p) { _snprintf_s(reply, n, _TRUNCATE, "gvar %s: %s", a1, err); return true; }
+        float fv = 0.0f; unsigned uv = 0;
+        const bool okf = read_float(static_cast<float*>(p), fv);
+        __try { uv = *static_cast<unsigned*>(p); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        _snprintf_s(reply, n, _TRUNCATE, "gvar %s -> %p (%s) float=%.4f raw=0x%08X byte=%u",
+                    a1, p, where(static_cast<float*>(p)), okf ? fv : 0.0f, uv, uv & 0xFF);
+        return true;
+    }
+    if (!strcmp(cmd, "gvarset")) {
+        // The one deliberate write. Float only, and it says what it replaced.
+        if (!has2) { _snprintf_s(reply, n, _TRUNCATE, "usage: gvarset <Module.Field> <float>"); return true; }
+        char err[96] = {};
+        void* p = gvar::lookup(a1, gvar::kFloat32, err, sizeof(err));
+        if (!p) { _snprintf_s(reply, n, _TRUNCATE, "gvarset %s: %s", a1, err); return true; }
+        float was = 0.0f; read_float(static_cast<float*>(p), was);
+        const float v = static_cast<float>(atof(a2));
+        write_float(static_cast<float*>(p), v);
+        VRLOG("[gvar] %s @%p: %.4f -> %.4f", a1, p, was, v);
+        _snprintf_s(reply, n, _TRUNCATE, "gvarset %s @%p: %.4f -> %.4f", a1, p, was, v);
         return true;
     }
     if (!strcmp(cmd, "fovfind")) {
