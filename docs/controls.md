@@ -562,3 +562,20 @@ invisible.
 The offset stays decremented at command time (the return phase runs on it), but the **view** now
 uses `offset + in-flight`, which is exactly `−(landed)`. The compensation tracks what the camera
 has actually done. One line, no new state.
+
+### And the jump at the start of the burst was the in-flight valve (2026-09-02, later still)
+
+With the aim loop **off** there was no jump; with it on, a per-frame trace of a 49° swing showed
+`body + offset + in-flight` — which must stay flat if the view is held — dipping 4° over the first
+three frames of the burst and wandering after. The arithmetic pinned it: at one frame the body
+moved −1.46°, the emit added −6.91°, so in-flight should have read −12.1; it read **−13.22**. The
+missing 1.1° was `in-flight *= 0.95` — the valve added so a menu could not wedge the loop shut.
+With 20° in flight during a fast swing that is a 1°/frame *phantom landing*, and since the view is
+now compensated for what has landed, it rotated the view by exactly that.
+
+The valve now opens only after the camera has been **stationary for 30 frames** — the case it was
+for — and never during a swing.
+
+Remaining, smaller: commanded 52.4° vs landed 48.9° on that swing — the mouse-gain estimate is
+~7% off at high rates (BC2's mouse smoothing is not linear), so each swing leaves ~3° and the
+return overshoots by it. That is tuning, not a fault.
