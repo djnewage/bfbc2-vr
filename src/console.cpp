@@ -8,6 +8,7 @@
 #include "shader_registry.h"
 #include "render_passes.h"
 #include "constants.h"
+#include "image_dump.h"
 #include "logger.h"
 
 #include <windows.h>
@@ -58,6 +59,7 @@ void run_line(const char* line)
     if (!handled) handled = shaderreg::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = rpass::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = vrconst::command(cmd, args, reply, sizeof(reply));
+    if (!handled) handled = imgdump::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = camover::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = vrcomp::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = memscan::command(cmd, args, reply, sizeof(reply));

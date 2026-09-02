@@ -20,6 +20,7 @@ add_library(d3d9 SHARED
     src/draw_policy.cpp
     src/draw_diag.cpp
     src/render_passes.cpp
+    src/image_dump.cpp
     src/console.cpp
     src/memscan.cpp
     src/os_input.cpp
