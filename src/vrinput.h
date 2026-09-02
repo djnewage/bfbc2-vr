@@ -34,5 +34,8 @@ void status(FILE* f);
 // applied against what has LANDED, not what was commanded, or the view jumps
 // ahead of the body by this amount and snaps back as the camera catches up.
 float aim_inflight();
+bool  aim_firing();          // firing-mode trigger state as the loop last saw it
+bool  aim_returning();
+unsigned aim_emits();
 
 } // namespace vrinput
