@@ -8,8 +8,14 @@ in the headset** — the game just sits in a singleplayer level with SteamVR run
 | `bfbc2vr_cmd.txt` | one command per line; read every ~10 frames, executed, then truncated |
 | `bfbc2vr_status.txt` | rewritten every ~2 s and after every command: correction/HMD state, FOV tangents, viewmodel counters, scanner/hunt state |
 | `bfbc2vr.log` | every command echoes `[cmd] <name> <args> -> <reply>` |
-| `bfbc2vr_eyeL_NN.bmp` / `eyeR` | `shot` — the two eye textures as submitted |
-| `bfbc2vr_draws_NN.txt` | `census` — 4-frame draw signature table |
+| `bfbc2vr_eyeL_<stamp>_NN.bmp` / `eyeR` | `shot` — the two eye textures as submitted |
+| `bfbc2vr_draws_<stamp>_NN.txt` | `census` — 4-frame draw signature table |
+| `bfbc2vr_shaders_<stamp>_NN.txt` | `shaders` — every CTAB, vertex and pixel, plus a register→names index |
+| `bfbc2vr_passes_<stamp>_NN.txt` | `passes` — ordered render passes with targets, formats, camera blocks, election |
+| `bfbc2vr_snapshot_<stamp>_NN.txt` / `diff` | `consts` — the 256-register mirror with the STABLE/VARYING split |
+
+`<stamp>` is the launch time (`YYYYMMDD-HHMMSS`, also printed in the log header). Before
+2026-09-02 every index restarted at 0 per launch and each run silently overwrote the last.
 
 ## Commands
 
@@ -18,6 +24,9 @@ in the headset** — the game just sits in a singleplayer level with SteamVR run
 | `status` | force a status write |
 | `shot` | save both eye textures (BMP) |
 | `census` | 4-frame draw census |
+| `shaders` | dump every parsed constant table — see *Engine recon* below |
+| `passes [n]` | record `n` frames of render passes (default 2, max 8) |
+| `consts` / `consts baseline` / `consts diff` | F9 / F10 / F11 without the keyboard |
 | `widen <x>` / `auto on\|off` | manual FOV widen factor / automatic headset match |
 | `mode <0-3>` / `push <m>` | weapon projection mode / arm's-length push |
 | `ownproj on\|off` | per-draw own-projection correction (off = old global path) |
@@ -81,3 +90,26 @@ own treatment (BFVR: projection scale + eye-filling reticle quad).
   unclassifiable (no push) — so it defaults to off.
 - Arm deformation: present at camera FOV ≥ 55 with our correction on; the decisive test (our
   correction fully off at 109°) is still pending — the game was paused when it ran.
+
+## Engine recon (2026-09-02, branch `engine-recon`)
+
+Three dumps added so the engine is read rather than inferred. None of them changes rendering;
+each is inert until its verb is issued.
+
+**`shaders`** — the CTAB the game embeds in every shader, which the mod had been parsing at
+`CreateVertexShader` time and discarding. Now kept for every register set (float / int / bool /
+sampler), with the `D3DXSHADER_TYPEINFO` class and shape, for pixel shaders as well, and with a
+count of how often each shader was bound. The file ends with a **register → names** index for the
+vertex float file: for `c185`, every name any shader declares there and how heavily those shaders
+are used. That is the declaration behind `kViewProjBase = 185`, which until now rested on watching
+values change.
+
+**`passes`** — a pass is a contiguous run of draws with the same render-target set. Per pass: every
+bound colour target and the depth-stencil with identity, size, format and multisample; the `Clear`
+calls; `BeginScene`/`EndScene`; draw and primitive counts; the vertex shaders used; and every
+`c185` projection written during it with its `c189` heading, marked `ELECTED` if it is the one the
+end-of-frame camera election adopted. This is the table that decides whether the election is
+picking the right pass — a shadow cascade should show as its own smaller pass into its own
+target, not as a competitor for "the player's camera".
+
+**`consts`** — the existing F9/F10/F11 constant-mirror tools, driveable from the command file.

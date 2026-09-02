@@ -104,9 +104,9 @@ public:
     // Intercepted: render-target shadow for the draw census (see draw_diag.h).
     HRESULT STDMETHODCALLTYPE SetRenderTarget(DWORD i, IDirect3DSurface9* s) override;
     HRESULT STDMETHODCALLTYPE GetRenderTarget(DWORD i, IDirect3DSurface9** s) override { return m_real->GetRenderTarget(i, s); }
-    HRESULT STDMETHODCALLTYPE SetDepthStencilSurface(IDirect3DSurface9* s) override { return m_real->SetDepthStencilSurface(s); }
+    HRESULT STDMETHODCALLTYPE SetDepthStencilSurface(IDirect3DSurface9* s) override;
     HRESULT STDMETHODCALLTYPE GetDepthStencilSurface(IDirect3DSurface9** s) override { return m_real->GetDepthStencilSurface(s); }
-    HRESULT STDMETHODCALLTYPE Clear(DWORD c, const D3DRECT* r, DWORD f, D3DCOLOR col, float z, DWORD st) override { return m_real->Clear(c, r, f, col, z, st); }
+    HRESULT STDMETHODCALLTYPE Clear(DWORD c, const D3DRECT* r, DWORD f, D3DCOLOR col, float z, DWORD st) override;
 
     HRESULT STDMETHODCALLTYPE GetTransform(D3DTRANSFORMSTATETYPE s, D3DMATRIX* m) override { return m_real->GetTransform(s, m); }
     HRESULT STDMETHODCALLTYPE MultiplyTransform(D3DTRANSFORMSTATETYPE s, const D3DMATRIX* m) override { return m_real->MultiplyTransform(s, m); }

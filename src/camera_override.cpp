@@ -4,6 +4,7 @@
 #include "vr_compositor.h"
 #include "draw_policy.h"
 #include "draw_diag.h"
+#include "render_passes.h"
 #include "memscan.h"
 #include "vrinput.h"
 #include "aim_policy.h"
@@ -226,11 +227,13 @@ void note_camera_candidate(const float* vp)
     if (g_cand_cur >= 0 && g_cand_cur < g_cand_n &&
         std::memcmp(vp, g_cand[g_cand_cur].vp, sizeof(g_cand[g_cand_cur].vp)) == 0) {
         ++g_cand[g_cand_cur].weight;
+        rpass::on_camera_write(g_cand[g_cand_cur].proj);
         return;
     }
 
     drawpolicy::ProjParams p{};
     drawpolicy::recover_projection(vp, p);    // failure leaves perspective=false
+    rpass::on_camera_write(p);
     for (int i = 0; i < g_cand_n; ++i) {
         if (!tangents_match(g_cand[i].proj, p)) continue;
         ++g_cand[i].weight;
@@ -261,6 +264,7 @@ void attach_camera_block(const float* rows)
     c.right[0] = c.rows[0]; c.right[1] = c.rows[1]; c.right[2] = c.rows[2];
     c.eye[0] = row3[0]; c.eye[1] = row3[1]; c.eye[2] = row3[2];
     c.have_cam = true;
+    rpass::on_camera_heading(c.rows);
 }
 
 // End of frame: promote the player's camera, or keep the last good one.
@@ -285,6 +289,7 @@ void promote_player_camera(float aspect)
                 g_have_eye = true;
             }
             g_prev_player_proj = c.proj;
+            rpass::on_camera_elected(c.proj);
         } else {
             // Nothing plausible this frame - hold what we had rather than
             // adopting a pass we have already judged is not the player's.
@@ -1127,6 +1132,7 @@ int on_draw(const void* return_address, bool indexed, unsigned prim_count)
             t_pending.pc != drawpolicy::ProjClass::NotPerspective && t_pending.pc != drawpolicy::ProjClass::NoWvp;
         if (!own_persp) verdict = 2;
     }
+    rpass::on_draw(facts ? facts->hash : 0ull, prim_count);
     if (!drawdiag::capturing()) return verdict;
 
     drawdiag::Record rec;

@@ -6,6 +6,8 @@
 #include "settings.h"
 #include "draw_diag.h"
 #include "shader_registry.h"
+#include "render_passes.h"
+#include "constants.h"
 #include "logger.h"
 
 #include <windows.h>
@@ -29,6 +31,7 @@ void write_status()
     memscan::status(f);
     vrinput::status(f);
     shaderreg::status(f);
+    rpass::status(f);
     settings::status(f);
     fprintf(f, "census: %s\n", drawdiag::capturing() ? "capturing" : "idle");
     fclose(f);
@@ -53,6 +56,8 @@ void run_line(const char* line)
     else if (!strcmp(cmd, "save")) { settings::save(); handled = true; _snprintf_s(reply, sizeof(reply), _TRUNCATE, "settings written"); }
     else if (!strcmp(cmd, "census")) { drawdiag::request_capture(4); handled = true; _snprintf_s(reply, sizeof(reply), _TRUNCATE, "census requested"); }
     if (!handled) handled = shaderreg::command(cmd, args, reply, sizeof(reply));
+    if (!handled) handled = rpass::command(cmd, args, reply, sizeof(reply));
+    if (!handled) handled = vrconst::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = camover::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = vrcomp::command(cmd, args, reply, sizeof(reply));
     if (!handled) handled = memscan::command(cmd, args, reply, sizeof(reply));

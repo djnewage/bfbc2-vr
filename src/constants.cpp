@@ -332,4 +332,20 @@ void on_present()
     if (key_pressed(VK_F11)) dump_diff_vs_baseline();
 }
 
+bool command(const char* cmd, const char* args, char* reply, size_t n)
+{
+    if (strcmp(cmd, "consts") != 0) return false;
+    if (args && _stricmp(args, "baseline") == 0) {
+        mark_baseline();
+        _snprintf_s(reply, n, _TRUNCATE, "consts: baseline marked (F10)");
+    } else if (args && _stricmp(args, "diff") == 0) {
+        dump_diff_vs_baseline();
+        _snprintf_s(reply, n, _TRUNCATE, "consts: diff vs baseline written (F11)");
+    } else {
+        dump_snapshot();
+        _snprintf_s(reply, n, _TRUNCATE, "consts: snapshot written (F9)");
+    }
+    return true;
+}
+
 } // namespace vrconst

@@ -14,6 +14,7 @@
 #include "constants.h"
 #include "camera_override.h"
 #include "shader_registry.h"
+#include "render_passes.h"
 #include "vr_compositor.h"
 #include "logger.h"
 
@@ -105,11 +106,13 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::BeginScene()
 {
     static bool first = true;
     if (first) { first = false; VRLOG("[hook] first BeginScene - device is rendering through our wrapper"); }
+    rpass::on_begin_scene();
     return m_real->BeginScene();
 }
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::EndScene()
 {
+    rpass::on_end_scene();
     return m_real->EndScene();
 }
 
@@ -125,6 +128,7 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Present(const RECT* src, const RECT
     camover::on_present();
     vrcmd::on_present();
     shaderreg::on_present();
+    rpass::on_present();
     vrcomp::submit_frame();
     return m_real->Present(src, dst, wnd, dirty);
 }
@@ -205,6 +209,7 @@ HRESULT STDMETHODCALLTYPE D3D9SwapChainWrapper::Present(const RECT* src, const R
     camover::on_present();
     vrcmd::on_present();
     shaderreg::on_present();
+    rpass::on_present();
     vrcomp::submit_frame();
     return m_real->Present(src, dst, wnd, dirty, flags);
 }
@@ -224,7 +229,20 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetRenderState(D3DRENDERSTATETYPE s
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetRenderTarget(DWORD i, IDirect3DSurface9* s)
 {
     if (i == 0) camover::note_render_target(s);
+    rpass::on_set_render_target(i, s, s != nullptr && s == vrcomp::backbuffer_surface());
     return m_real->SetRenderTarget(i, s);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetDepthStencilSurface(IDirect3DSurface9* s)
+{
+    rpass::on_set_depth_stencil(s);
+    return m_real->SetDepthStencilSurface(s);
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Clear(DWORD c, const D3DRECT* r, DWORD f, D3DCOLOR col, float z, DWORD st)
+{
+    rpass::on_clear(f, col, z, st);
+    return m_real->Clear(c, r, f, col, z, st);
 }
 
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::DrawPrimitive(D3DPRIMITIVETYPE t, UINT s, UINT c)

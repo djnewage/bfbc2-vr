@@ -47,4 +47,11 @@ void dump_diff_vs_baseline();  // only what changed - the discovery signal
 // Called once per Present. Polls hotkeys and emits periodic frame stats.
 void on_present();
 
+// Console verbs for the same three actions, so they can be driven from the
+// command file with nobody at the keyboard:
+//   consts            dump_snapshot()
+//   consts baseline   mark_baseline()
+//   consts diff       dump_diff_vs_baseline()
+bool command(const char* cmd, const char* args, char* reply, size_t n);
+
 } // namespace vrconst
