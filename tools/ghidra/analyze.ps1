@@ -7,6 +7,8 @@
 #   frostbite_types.txt   type-name -> TypeInfoData -> TypeInfo chains, link-offset inference, root candidates
 #   functions.csv         rva,size,name for every function (resolves census call-site RVAs)
 #   known_xrefs.txt       who references the FOV object's vtable (its constructor)
+#   type_registration.txt every (TypeInfoData, TypeInfo object, ctor) registration site, decoded, and the ctor decompiled
+#   reflection.txt/.json  the full type registry: 1900 types, 9039 typed fields with offsets (dump_reflection.py)
 #
 # The Ghidra project itself is build\ghidra\bfbc2.gpr and is reusable from the GUI:
 #   C:\tools\ghidra_12.1.3_PUBLIC\ghidraRun.bat  ->  open build\ghidra\bfbc2.gpr
@@ -39,7 +41,8 @@ Write-Host "JAVA_HOME = $env:JAVA_HOME"
 
 $common = @($Proj, "bfbc2", "-scriptPath", $PSScriptRoot,
             "-postScript", "FindFrostbiteTypes.java", $Out,
-            "-postScript", "ExportFunctions.java", $Out)
+            "-postScript", "ExportFunctions.java", $Out,
+            "-postScript", "FindTypeRegistration.java", $Out)
 
 if ($NoImport) {
     & $Headless @common -process "BFBC2Game.exe" -noanalysis
@@ -54,4 +57,9 @@ if ($NoImport) {
     & $Headless @common -import $Staged -overwrite
 }
 if ($LASTEXITCODE -ne 0) { throw "analyzeHeadless exited $LASTEXITCODE" }
+# The reflection tables are unencrypted and need neither Ghidra nor a running
+# game; this is the pass that produces the engine map's class/field evidence.
+python (Join-Path $PSScriptRoot "dump_reflection.py") $Staged $Out
+if ($LASTEXITCODE -ne 0) { throw "dump_reflection.py exited $LASTEXITCODE" }
+
 Write-Host "`nOutputs:"; Get-ChildItem $Out | Format-Table Name, Length, LastWriteTime -AutoSize

@@ -16,6 +16,9 @@ here is ever used against multiplayer or Venice Unleashed.
 | Image base / size (runtime) | `0x00400000` / `0x1970000` (ends `0x1D70000`) | header of every `bfbc2vr_draws_*.txt` |
 | Reflection type names retained | **890 distinct `*Data` identifiers**, incl. `ShotConfigData`, `CameraData`, `SoldierEntity`, `EntityData` ×182 | `grep -a` over the exe, 2026-09-02 |
 | `bc2-engine.md` static `Client 0x180AD880` | **not an image address** on this build (past `0x1D70000`) | image geometry above |
+| `.text` is **SteamStub-encrypted on disk** | entropy 8.00; entry point `0x019142EE` inside a section named `.bind` (entropy 7.99). Static analysis of engine *code* needs a runtime image dump | `tools/ghidra/explore_typeinfo.py` section table, `build/ghidra/out/type_registration.txt` (the constructor decompiles as junk) |
+| Static initialisers live in an unencrypted section named **`ctr`** | RVA `0xF87000`, entropy 6.25; every type registration is a `push <TypeInfoData>; mov ecx,<TypeInfo>; call` sequence there — 2,081 sites, 941 to ctor `0x00500880`, 273 to `0x0043C390` | `type_registration.txt` |
+| Reflection data has its own sections: **`typeinfo`** (RVA `0x17F1000`, 0x22D18 B) and **`fieldinf`** (RVA `0x1814000`, 0x34E60 B) | unencrypted; **readable from the file with no runtime** | `tools/ghidra/dump_reflection.py` |
 
 ## Rendering — constant registers
 
@@ -37,6 +40,29 @@ here is ever used against multiplayer or Venice Unleashed.
 | Culling wall | beyond ~58°×45° the widen trick shows void; the cull frustum follows the engine FOV field | `docs/console.md:51-84` |
 | Weapon draws | bone-skinned, own FOV tan 0.357 × 0.268; arms+gloves shader hash `76fbfb1ef6146ed9` | `docs/viewmodel-census.md:136-142` |
 
+## Reflection system — measured layout
+
+Read off the file by `tools/ghidra/dump_reflection.py`; full dump in `docs/recon/reflection-bfbc2.txt`
+(**1,900 types, 1,381 with value tables, 9,039 typed fields; every consistency check passes**).
+
+| Fact | Value | Proof |
+|---|---|---|
+| `TypeInfoData` (class) | 24 B: `{name*, size<<16\|flags, module*, 0x0001\|count<<8\|align, 0, 0}`; flags `0x29` = class with embedded field-table pointer at +24 (28 B) | 281 of 281 flags-`0x29` records carry it; 0 of 960 flags-`0x35` do |
+| `TypeInfoData` (scalar) | flags `0xC0xx`/`0x41xx`: `+12` = alignment, `+16` = size (plain), `+20` = 0 | `Boolean..Float64, String, FileRef` region `0x01BF144C..` |
+| `TypeInfoData` (enum) | flags `0x179`, size 4; pointer at +24 to a table whose `offset` column is the enumerator value | `CoreLogLevel` → `CllNone=0 … CllDebug=9` |
+| `FieldInfoData` | 24 B: `{name*, flags\|arraySize<<16, fieldType*, secondaryType*, offset, attributes*}` | tables **tile** (1,377 of 1,380 adjacent pairs end exactly where the next begins) |
+| Field-table linkage | 520 records embed the pointer at +24; **861** get it from the `ctr` initialiser (`push <table>` beside `push <record>`); none ambiguous | `dump_reflection.py` counters |
+| `fieldType` points at the **runtime `TypeInfo` object**, not the record | objects are zero on disk (typeinfo padding / `.data` BSS); 1,468 mapped via `mov ecx` in `ctr` | same |
+| Scalar objects (registered from encrypted `.text`, no static ref) | laid out in record order: `0x01BF1354 + 0x10·k` = `Boolean, Uint8, Int8, Uint16, Int16, Uint32, Int32, Uint64, Int64, Float32, Float64, String, FileRef, Guid`; `0x01562D60 + 0x14·k` = `Vec4, Quat, Plane, LinearTransform, Mat4, AxisAlignedBox`; `Vec2 @0x0155E0AC`, `Vec3 @0x01562ADC` | every mapping's **measured field-packing size equals the record size** (20 of 20 with uses) |
+| Array fields | field flags `0x48`; type = `ArrayBase`, element type in `secondaryType` | e.g. `SoldierWeaponData.WeaponStates: ArrayBase<WeaponStateData>` |
+| Classes the engine map needs | `ShotConfigData` (0x50): `Vec3 InitialSpeed @0, InitialDirection @0x10, InitialPosition @0x20`, `Boolean ForceSpawnToCamera @0x49`, `ProjectileEntityData* @0x44` | `reflection-bfbc2.txt` |
+| | `SoldierWeaponData` (0x130): `Float32 ZoomRenderFov @0x30`, `RenderFov @0x3C`, `WeaponFiringData* WeaponFiring @0x98`, `FirstPersonCameraData* @0x80` | same |
+| | `GameRenderSettings` (0xA4): **`Float32 ForceFov @0x18`**, `NearPlane @0x10`, `ViewDistance @0x0C`, `Boolean LockView @0x81` | same |
+| | `LevelData` (0x3C0): `Float32 DefaultFOV @0x1F4`, `InfantryFOVMultiplier @0x1F0` (the poke-found object's `45.1 = 55 × 0.82` is this) | same |
+| | `CameraData` (0x40): occlusion/fade only — **no FOV field**; `GameSettings.AutoAimEnabled @0x9C` | same |
+| `bc2-engine.md` claims now **verified**: `ShotConfigData` 0x00/0x10/0x20; `SoldierWeaponData.m_zoomRenderFov +0x30`, `m_renderFov +0x3C` | | above |
+| Not reflected at all (runtime classes): `SoldierEntity`, `ClientPlayer`, `RenderView`, `ClientSoldierWeapon`, `AnimatedSoldier`, `PlayerManager` — no such type-name strings | so their offsets in `bc2-engine.md` can only be checked at runtime | `frostbite_types.txt` controls |
+
 ## Engine objects
 
 | Fact | Value | Proof |
@@ -55,9 +81,11 @@ here is ever used against multiplayer or Venice Unleashed.
 
 ## Open questions (not yet verified on this build)
 
-- The reflection layout (`ITypedObject::getType` at vslot 3, `FieldInfoData`) — `tools/ghidra/FindFrostbiteTypes.java` output pending.
+- The registry's linked list (`TypeInfo::m_next`) and its static head: the constructor `0x00500880` is in encrypted `.text`. Needs a **runtime image dump** (the mod is already in-process) and a second Ghidra pass over the decrypted image.
+- `ITypedObject::getType` at vslot 3 — runtime only.
 - Statics `GameContext 0x1570C40`, `WorldRender 0x156B7F4` — inside the image, unverified.
-- Every class/field offset in `bc2-engine.md` — unverified.
+- Offsets of the *runtime* classes in `bc2-engine.md` (`ClientControllableEntity.m_cameraLocalSpace`, `ClientWeaponFiringEffects.m_shootSpace`, `RenderView.*`) — not reflected; runtime only.
+- Whether writing `GameRenderSettings.ForceFov` is the sanctioned lever the FOV hunt has been emulating, and whether the poke-found object (vtable `0x014755C8`) *is* the render-settings instance. Test: find the `GameRenderSettings` instance at runtime and compare `+0x18` against the value `fovfind` locates.
 - Which shader names `c185`/`c189` — `shaders` dump pending (first in-game run on this branch).
 - The render-pass order and which pass the camera election picks — `passes` dump pending.
 - World scale (`units_per_metre`, assumed 1.0 at `draw_policy.h:206`).
