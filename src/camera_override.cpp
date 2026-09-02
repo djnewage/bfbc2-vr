@@ -111,6 +111,7 @@ bool  g_aim_ref_valid = false;
 constexpr float kMaxTurnOffsetContinuous = 25.0f  * kPi / 180.0f;
 constexpr float kMaxTurnOffsetFiring     = 120.0f * kPi / 180.0f;
 float g_max_turn_offset = kMaxTurnOffsetContinuous;
+unsigned g_aimtrace_frames = 0;   // `aimtrace [n]`: per-frame view-hold log
 constexpr float kTurnBleedPerFrame = 0.02f * kPi / 180.0f;
 bool  g_full_orientation = true;   // 'headroll off' falls back to yaw+pitch
 float g_hmd_dpos[3]  = {};      // delta in OpenVR axes (+X right, +Y up, -Z fwd)
@@ -1396,6 +1397,19 @@ void on_present()
     // that does differ in shape.
     promote_player_camera(0.0f);
 
+    // Per-frame trace of the view-hold, armed by `aimtrace`. If the hold is
+    // right, body + offset + inflight is constant across a swing.
+    if (g_aimtrace_frames > 0) {
+        --g_aimtrace_frames;
+        float cy = 0.0f, cp = 0.0f;
+        const bool have = game_camera_angles(cy, cp);
+        const float off = g_aim_view_offset, infl = vrinput::aim_inflight();
+        const float deg = 180.0f / kPi;
+        VRLOG("[trace] f=%u fire=%d ret=%d emits=%u body=%s%.2f off=%.2f infl=%.2f held=%.2f hmd=%.2f turn=%.2f",
+              g_frame_index, vrinput::aim_firing() ? 1 : 0, vrinput::aim_returning() ? 1 : 0, vrinput::aim_emits(),
+              have ? "" : "?", cy * deg, off * deg, infl * deg, (cy + off + infl) * deg, g_hmd_yaw * deg, g_turn_yaw * deg);
+    }
+
     // Controller input runs here: after the head deltas exist (it may move the
     // view reference) and before the correction is built from them.
     vrinput::on_present();
@@ -1706,6 +1720,11 @@ bool command(const char* cmd, const char* args, char* reply, size_t n)
     const bool has1 = a1[0] != 0;
     const bool on = has1 && (!_stricmp(a1, "on") || !strcmp(a1, "1"));
 
+    if (!strcmp(cmd, "aimtrace")) {
+        g_aimtrace_frames = has1 ? static_cast<unsigned>(atoi(a1)) : 600u;
+        _snprintf_s(reply, n, _TRUNCATE, "aimtrace: logging %u frames", g_aimtrace_frames);
+        return true;
+    }
     if (!strcmp(cmd, "widen")) {
         if (has1) g_fov_manual = (std::min)((std::max)(static_cast<float>(atof(a1)), 0.5f), 3.5f);
         _snprintf_s(reply, n, _TRUNCATE, "widen manual=%.2f auto=%s (%.2f/%.2f)", g_fov_manual, g_fov_auto ? "on" : "off", g_fov_widen_x, g_fov_widen_y);

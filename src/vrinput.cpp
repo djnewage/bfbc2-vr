@@ -513,6 +513,9 @@ void update_aim(int hand)
 } // namespace
 
 float aim_inflight() { return g_aim_inflight; }
+bool  aim_firing()   { return g_aim_trigger_was; }
+bool  aim_returning() { return g_aim_returning; }
+unsigned aim_emits() { return g_aim_emits; }
 
 void release_all()
 {
