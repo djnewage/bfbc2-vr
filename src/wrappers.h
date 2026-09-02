@@ -173,8 +173,8 @@ public:
     HRESULT STDMETHODCALLTYPE GetStreamSourceFreq(UINT n, UINT* d) override { return m_real->GetStreamSourceFreq(n, d); }
     HRESULT STDMETHODCALLTYPE SetIndices(IDirect3DIndexBuffer9* ib) override { return m_real->SetIndices(ib); }
     HRESULT STDMETHODCALLTYPE GetIndices(IDirect3DIndexBuffer9** ib) override { return m_real->GetIndices(ib); }
-    HRESULT STDMETHODCALLTYPE CreatePixelShader(const DWORD* fn, IDirect3DPixelShader9** s) override { return m_real->CreatePixelShader(fn, s); }
-    HRESULT STDMETHODCALLTYPE SetPixelShader(IDirect3DPixelShader9* s) override { return m_real->SetPixelShader(s); }
+    HRESULT STDMETHODCALLTYPE CreatePixelShader(const DWORD* fn, IDirect3DPixelShader9** s) override;
+    HRESULT STDMETHODCALLTYPE SetPixelShader(IDirect3DPixelShader9* s) override;
     HRESULT STDMETHODCALLTYPE GetPixelShader(IDirect3DPixelShader9** s) override { return m_real->GetPixelShader(s); }
     HRESULT STDMETHODCALLTYPE SetPixelShaderConstantF(UINT r, const float* d, UINT c) override { return m_real->SetPixelShaderConstantF(r, d, c); }
     HRESULT STDMETHODCALLTYPE GetPixelShaderConstantF(UINT r, float* d, UINT c) override { return m_real->GetPixelShaderConstantF(r, d, c); }

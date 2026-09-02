@@ -272,6 +272,19 @@ HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetVertexShader(IDirect3DVertexShad
     return m_real->SetVertexShader(s);
 }
 
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::CreatePixelShader(const DWORD* fn, IDirect3DPixelShader9** s)
+{
+    const HRESULT hr = m_real->CreatePixelShader(fn, s);
+    if (SUCCEEDED(hr) && s && *s) shaderreg::on_create_pixel_shader(fn, *s);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::SetPixelShader(IDirect3DPixelShader9* s)
+{
+    shaderreg::on_set_pixel_shader(s);
+    return m_real->SetPixelShader(s);
+}
+
 HRESULT STDMETHODCALLTYPE D3D9DeviceWrapper::Reset(D3DPRESENT_PARAMETERS* pp)
 {
     if (pp) {

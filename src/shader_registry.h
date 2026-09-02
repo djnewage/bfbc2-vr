@@ -19,6 +19,7 @@
 #pragma once
 
 #include <d3d9.h>
+#include <cstdio>
 
 namespace shaderreg {
 
@@ -28,6 +29,20 @@ void on_create_vertex_shader(const DWORD* bytecode, IDirect3DVertexShader9* shad
 
 // Track the active shader so constant writes can later be attributed.
 void on_set_vertex_shader(IDirect3DVertexShader9* shader);
+
+// Pixel shaders carry the same CTAB. They are not part of any correction -
+// the mod never touches a pixel constant - but their tables name the texture
+// slots and per-pixel parameters, which the engine map needs.
+void on_create_pixel_shader(const DWORD* bytecode, IDirect3DPixelShader9* shader);
+void on_set_pixel_shader(IDirect3DPixelShader9* shader);
+
+// Write every parsed table - vertex and pixel, every register set, with type
+// info and bind counts - to a stamped dump file, plus a register -> names index
+// for the vertex float file. Console verb `shaders`. Returns false if the file
+// could not be opened; path_out receives the path either way.
+bool dump(char* path_out, size_t path_size);
+bool command(const char* cmd, const char* args, char* reply, size_t n);
+void status(FILE* f);
 
 // Called per Present: occasionally flushes newly seen constant names to the log.
 void on_present();
