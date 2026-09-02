@@ -507,3 +507,21 @@ stick delivers real deflection. Two rounds of input fixes were chasing a symptom
 
 `cam-candidates=` and `promote-failed=` are in the status block. `cam-yaw-rejected` near zero is the
 signal that this is healthy; ~97 percent of frames is what the failure looked like.
+
+## Grip calibration is a pose, not a button (2026-09-02)
+
+`grip recal` (and F5, which also recenters the head) captures the controller's pose as the
+reference the weapon delta is measured from. From that instant the gun sits at BC2's default
+viewmodel position and moves 1:1 with the controller **relative to that pose**. So the pose you
+hold at capture defines "forward":
+
+- captured with the hand relaxed and low → the gun reads pitched **up** when you later aim level;
+- captured **while aiming** — controller pointed straight ahead and level, held where the on-screen
+  gun is drawn — → the gun is level when you are.
+
+Confirmed in-headset: a "gun points up though I'm pointing straight ahead" report was fixed by
+recapturing in an aiming pose, with no code change. Do the capture like a range check, not a
+handshake.
+
+The rest position is always BC2's own; `push` and the `weapon offset` values move it if you want
+the gun to rest further out.
